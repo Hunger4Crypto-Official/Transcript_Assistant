@@ -1,0 +1,24 @@
+.env
+*.enc
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.venv/
+venv/
+*.egg-info/
+build/
+dist/
+.DS_Store
+
+# Recordings, transcripts, the vault, and the index never go near a remote.
+# The inbox placeholder is tracked so a fresh clone has somewhere to drop files;
+# nothing else under data/ is.
+data/*
+!data/inbox/
+data/inbox/*
+!data/inbox/README.txt
+
+# Your glossary may accumulate client names and carrier relationships.
+# Uncomment if you would rather keep it out of version control.
+# config/glossary.yaml

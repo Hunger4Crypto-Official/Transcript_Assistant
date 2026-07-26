@@ -28,15 +28,23 @@ Wait for the answer. Get it on the recording. Then proceed.
 
 ### What the software checks
 
-The consent detector scans the first 90 seconds for two things:
+The consent detector scans the first 90 seconds for three things:
 
-1. You announcing the recording
-2. **A different speaker** agreeing
+1. **Nobody objecting.** An objection anywhere in the window ends the question
+   immediately. Nothing said afterwards converts a refusal into consent — a
+   client saying "hold on, I really don't want this recorded" followed by your
+   "yeah, of course" is a refusal, and it is quarantined.
+2. **You** announcing the recording. When your speaker label can be identified
+   (`diarization.owner_label`), the announcement has to be yours. The other
+   party telling you *they* are recording is not you obtaining their consent.
+   When speakers cannot be identified at all, the announcement is accepted and
+   the verdict says it could not be attributed.
+3. **A different speaker** agreeing.
 
-Both are required. You agreeing with yourself does not count, and there is a
-test that enforces that. If both are not found on a profile that requires
-consent, the recording is **quarantined**: not analysed, not indexed, copied to
-`data/quarantine/<id>/` with a `WHY.md` explaining what to do.
+All three are required. You agreeing with yourself does not count, and there is
+a test that enforces that. If they are not all satisfied on a profile that
+requires consent, the recording is **quarantined**: not analysed, not indexed,
+copied to `data/quarantine/<id>/` with a `WHY.md` explaining what to do.
 
 To release one after you have listened and confirmed consent was actually
 obtained:
@@ -160,6 +168,14 @@ real control, which is not sending sensitive profiles to a cloud provider at all
 liability; transcripts are the asset. Ten years of transcripts costs you
 megabytes. Ten years of audio costs you a discovery request.
 
+Retention runs from when the conversation happened, not from when you processed
+it. Importing a three-year-old backlog does not reset the clock on any of it.
+
+The original audio is moved to `data/inbox/_processed/` after a successful run
+and swept on the `Raw audio` row above. If you disable
+`ingest.archive_originals`, the file stays where you left it and nothing expires
+it — retention only sweeps what it has indexed.
+
 The Husband profile is deliberately short. A multi-year indexed archive of your
 marriage is an asset with no upside and real downside. If you disagree, change
 it, and write down why.
@@ -211,17 +227,41 @@ If encryption is unavailable, the pipeline **refuses to write** rather than
 falling back to plaintext. You will notice a crash. You would not notice a quiet
 plaintext write.
 
+The SQLite index at `data/bridge.db` is an ordinary file, so it holds no
+plaintext either. For an encrypted recording it stores metadata — dates,
+duration, profile, consent status, cost — and marks the transcript and the
+extracted fields as withheld. Reading them means decrypting the vault artifact,
+which is what `run.py open` and the digest do. A digest covering an encrypted
+profile therefore needs the passphrase, and says so in the section when it
+cannot get it rather than rendering an empty one.
+
 ---
 
 ## 8. Audit log
 
-Every ingest, route, compliance decision, quarantine, release, and retention
-deletion is written to the `audit` table with a UTC timestamp. Releases from
-quarantine are marked `actor=human`.
+Every ingest, ASR locality decision, route, compliance decision, quarantine,
+release, and retention deletion is written to the `audit` table with a UTC
+timestamp. Releases from quarantine are marked `actor=human`.
 
-Transcript content is never written to application logs. Logs carry
-identifiers, hashes, counts, and durations. You can hand a log file to someone
-for debugging without handing over anything private.
+Read it:
+
+```bash
+python run.py audit                          # last 100 entries
+python run.py audit --recording-id rec_...   # one recording, start to finish
+python run.py audit --actor human            # only the decisions you made
+python run.py audit --days 90 --out audit.csv
+```
+
+Application logs are redacted on the way out. The patterns in
+`compliance.redact_patterns` are applied to every log line, and to exception
+text and tracebacks — which is where provider errors put the raw API response
+body, so it is the part that actually matters. API keys are stripped
+unconditionally. Set `logging.redact_content: false` only if you understand what
+you are turning off.
+
+This is scrubbing, not a guarantee. It removes what the patterns match. A
+transcript quoted in an error message with no SSN, card number, or email in it
+will not be caught by a pattern designed to catch those.
 
 ---
 

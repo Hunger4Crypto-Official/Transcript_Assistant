@@ -1,0 +1,62 @@
+id: unfiled
+name: "Unfiled"
+short_name: "Unfiled"
+icon: "inbox"
+description: >
+  Anything the router could not confidently place. Still transcribed, still
+  indexed, still searchable. Reviewing this section periodically is how you
+  find the keywords your profiles are missing.
+
+sensitivity: "high"
+
+processing:
+  # Unknown content gets the cautious treatment by default.
+  allow_cloud_asr: false
+  allow_cloud_llm: false
+  require_consent: false
+  encrypt_at_rest: true
+  redact_before_llm: true
+
+retention:
+  transcript_days: 180
+  raw_audio_days: 30
+  audit_log_days: 365
+
+routing:
+  min_confidence: 0.0
+  keywords: []
+  negative_keywords: []
+  llm_hint: "Fallback only. Never selected directly by the router."
+
+extraction:
+  system_prompt: >
+    Summarise what this recording is about in plain language. Extract any
+    commitments, dates, or action items. Do not speculate about context you
+    were not given.
+  fields:
+    - key: "topic"
+      label: "Topic"
+      type: "string"
+      description: "One sentence describing what this recording is."
+    - key: "suggested_profile"
+      label: "Suggested Profile"
+      type: "string"
+      description: "Which of insurance_agent, sales_trainer, father, husband this most resembles, or 'none'."
+    - key: "suggested_keywords"
+      label: "Keywords To Add"
+      type: "list[string]"
+      description: "Distinctive terms from this recording that would have helped the router place it."
+    - key: "action_items"
+      label: "Action Items"
+      type: "list[string]"
+      description: "Anything that looks like a commitment or task."
+    - key: "next_action"
+      label: "Next Action"
+      type: "string"
+      description: "The clearest next step, or 'none'."
+
+digest:
+  heading: "Unfiled"
+  priority: 9
+  highlight_fields: ["topic", "suggested_profile"]
+  suppress_fields: []

@@ -1,0 +1,115 @@
+id: husband
+name: "Husband"
+short_name: "Husband"
+icon: "heart"
+description: >
+  Conversations with your wife. Same purpose as the Father profile: remember
+  what matters and follow through on what you said you would do.
+
+sensitivity: "maximum"
+
+processing:
+  allow_cloud_asr: false
+  allow_cloud_llm: false
+  require_consent: false          # legal consent; see spousal_consent below
+  encrypt_at_rest: true
+  redact_before_llm: true
+
+hard_lock:
+  local_processing_only: true
+  reason: "Private marital conversation. No third-party processing."
+
+spousal_consent:
+  # Read this one carefully. In an all-party consent state, your spouse is a
+  # party. Marriage is not an exception to the statute. Recording her without
+  # her knowledge is both a legal exposure and, separately, a bad idea.
+  she_knows_and_agreed: true
+  reaffirm_every_days: 30
+  # If this is false, the profile refuses to process and the file is quarantined.
+
+retention:
+  # Deliberately short. See RISKS in COMPLIANCE.md. A ten-year archive of your
+  # marriage, analysed and indexed, is an asset with no upside and real downside.
+  transcript_days: 180
+  raw_audio_days: 14
+  audit_log_days: 365
+
+routing:
+  min_confidence: 0.60
+  keywords:
+    - "honey"
+    - "babe"
+    - "dinner"
+    - "groceries"
+    - "date night"
+    - "anniversary"
+    - "in-laws"
+    - "vacation"
+    - "budget"
+    - "mortgage"
+    - "appointment"
+    - "pick up the kids"
+    - "weekend plans"
+    - "the house"
+  negative_keywords: []
+  llm_hint: >
+    Route here for conversations with the speaker's wife about household,
+    plans, family decisions, or the relationship. Do not route business
+    conversations here simply because she is present.
+
+extraction:
+  system_prompt: >
+    You are helping a husband keep track of shared commitments and plans.
+    Extract only what was actually said.
+
+    HARD CONSTRAINTS. You must follow all of these:
+    - Do NOT evaluate, score, or characterise the relationship.
+    - Do NOT assign fault, identify who was right, or take a side in any
+      disagreement.
+    - Do NOT psychologically assess either person or infer motives.
+    - Do NOT offer relationship advice.
+    - Do NOT produce a summary of an argument. If the transcript is primarily
+      a conflict, return only "requires_human_attention" set to true and stop.
+      A conversation between two people who love each other is not an artifact
+      to be indexed and re-litigated later.
+
+    Your job is commitments, logistics, and things worth remembering.
+  fields:
+    - key: "requires_human_attention"
+      label: "Requires Human Attention"
+      type: "boolean"
+      description: "True if the content is conflict or otherwise should not be summarised."
+      priority: "critical"
+    - key: "commitments_i_made"
+      label: "What I Said I Would Do"
+      type: "list[object]"
+      description: "Your commitments, with any date attached."
+      priority: "high"
+    - key: "shared_plans"
+      label: "Shared Plans"
+      type: "list[object]"
+      description: "Dates, trips, appointments, events you both agreed on."
+    - key: "she_asked_for"
+      label: "What She Asked For"
+      type: "list[quote]"
+      description: "Direct requests, verbatim. This is the field you will actually use."
+      priority: "high"
+    - key: "household_logistics"
+      label: "Household Logistics"
+      type: "list[object]"
+      description: "Bills, repairs, errands, scheduling."
+    - key: "worth_remembering"
+      label: "Worth Remembering"
+      type: "list[quote]"
+      description: "Good moments. Things you would want to recall on purpose."
+    - key: "next_action"
+      label: "Next Action"
+      type: "string"
+      description: "The one thing you should not let slide."
+
+digest:
+  heading: "Home"
+  priority: 4
+  highlight_fields: ["she_asked_for", "commitments_i_made", "next_action"]
+  suppress_fields: []
+  exclude_from_combined_export: true

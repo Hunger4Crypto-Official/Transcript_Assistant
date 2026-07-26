@@ -1,0 +1,68 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "plaud-bridge"
+version = "1.0.0"
+description = "Turn Plaud recorder exports into transcripts, per-profile analysis, and a digest, without the audio leaving your machine."
+readme = "README.md"
+requires-python = ">=3.10"
+keywords = ["transcription", "whisper", "plaud", "compliance", "privacy"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: End Users/Desktop",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Multimedia :: Sound/Audio :: Speech",
+    "Private :: Do Not Upload",
+]
+
+# The core stays small on purpose. See GOVERNANCE.md ADR-008: everything heavy
+# is optional and reports its own absence through `run.py doctor`.
+dependencies = [
+    "PyYAML>=6.0",
+    "cryptography>=42.0",
+]
+
+[project.optional-dependencies]
+# Required in practice for the father and husband profiles. Without a local
+# ASR those recordings fail rather than falling back to a cloud provider.
+local-asr = ["faster-whisper>=1.0.0"]
+# Speaker labels. Needs a HuggingFace token and an accepted model licence.
+diarize = ["pyannote.audio>=3.1", "torch>=2.0"]
+dev = ["pytest>=8.0", "ruff>=0.6"]
+
+[project.scripts]
+plaud-bridge = "plaud_bridge.cli:main"
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+filterwarnings = ["ignore::DeprecationWarning"]
+
+[tool.ruff]
+line-length = 100
+src = ["src", "tests"]
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "C4"]
+ignore = [
+    "E501",  # long lines are almost all prose in docstrings and comments
+    "B008",  # function call in default argument: not a pattern used here
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests reach into private helpers deliberately to pin down internal guarantees.
+"tests/*" = ["E402"]
+"run.py" = ["E402"]

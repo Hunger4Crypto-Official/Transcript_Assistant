@@ -95,6 +95,11 @@ diarization:
   owner_label: "Sasson"
 
 llm:
+  # Token rates below are what feed cost.halt_usd_per_run. They are a guardrail,
+  # not an invoice: they are read from the usage each provider reports, and a
+  # provider with both rates at 0 contributes nothing to the running total and
+  # says so in the log. VERIFY THESE AGAINST CURRENT PUBLISHED PRICING before
+  # relying on the halt threshold. Prices move; this file does not.
   providers: ["anthropic", "groq"]
 
   anthropic:
@@ -108,6 +113,9 @@ llm:
     timeout_seconds: 180
     max_retries: 4
     is_cloud: true
+    # Verify at anthropic.com/pricing.
+    usd_per_million_input_tokens: 3.00
+    usd_per_million_output_tokens: 15.00
 
   groq:
     enabled: true
@@ -119,6 +127,9 @@ llm:
     timeout_seconds: 180
     max_retries: 4
     is_cloud: true
+    # Verify at groq.com/pricing.
+    usd_per_million_input_tokens: 0.59
+    usd_per_million_output_tokens: 0.79
 
   local:
     enabled: false
@@ -129,6 +140,9 @@ llm:
     timeout_seconds: 600
     max_retries: 2
     is_cloud: false
+    # Your electricity bill is not an API charge.
+    usd_per_million_input_tokens: 0.0
+    usd_per_million_output_tokens: 0.0
 
 routing:
   # Stage 1: cheap keyword prescore narrows the candidate set.

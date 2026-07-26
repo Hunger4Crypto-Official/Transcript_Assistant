@@ -33,6 +33,18 @@ to draw.
 recording to local processing and encryption. This is intended. If you find it
 annoying, the fix is to record separately, not to relax the rule.
 
+**How it is enforced.** The gate computes `governing_profile` and
+`force_local_processing`, and `pipeline._analyse` reads them once and applies
+them to every analysis on the recording. Per-profile policy is a floor, never a
+ceiling: `extract()` takes the caller's answer and can only make it stricter.
+
+This is worth stating explicitly because the original code did the opposite.
+Each analysis recomputed locality from its own profile, so a recording matching
+both Husband and Sales Trainer kept the Husband analysis local and then sent the
+identical marital transcript to a cloud provider for the Sales Trainer one. The
+gate's verdict was computed correctly and read by nothing. If you add a stage
+that talks to a model, read the verdict.
+
 **Config.** `compliance.strictest_profile_governs`. Setting it false is
 supported and inadvisable.
 
@@ -74,20 +86,36 @@ defeats this entire control. There is no test that can catch it for you.
 
 ---
 
-## ADR-005: Routing runs before the compliance gate, conservatively
+## ADR-005: Everything before the gate defaults to local
 
 **Problem.** The gate needs to know which profiles matched to decide how
-strictly to treat the file. But routing itself uses an LLM call, which is the
-exact thing the gate is supposed to govern. Bootstrapping problem.
+strictly to treat the file. But routing itself uses an LLM call, and ASR runs
+even earlier, before there is any text to route on. Both are exactly the thing
+the gate is supposed to govern. Bootstrapping problem.
 
-**Decision.** Before routing, run the free keyword prescore. If any
-maximum-sensitivity profile shows signal above 0.15, the routing call itself
-runs local-only. Filenames are checked the same way before ASR.
+**Decision.** Pre-gate stages do not try to guess the content. They apply the
+policy every profile shares.
 
-**Trade-off.** Some business calls get routed locally when a keyword coincides.
-Slower, free, harmless. The reverse error is not harmless.
+- **Routing** runs local-only unless *every* routable profile permits a cloud
+  LLM. In the shipped config only Sales Trainer does, so routing is local.
+- **ASR** is local unless the filename positively names a profile that permits
+  cloud ASR *and* no locked profile is implicated. Cloud is opt-in per file.
 
-**Where.** `pipeline.py:_route` and `pipeline.py:_filename_suggests_sensitive`.
+**Trade-off.** Business calls get transcribed and routed locally unless you name
+the file for it. Slower, free, harmless. The reverse error is not harmless.
+
+**What this replaced, and why it is worth reading.** The original rule was the
+inverse: cloud by default, local only when a keyword from a locked profile
+happened to appear. A Plaud export is named `REC0042.wav`, which contains no
+keywords at all, so a recording of your child went to a third-party
+transcription service. The ADR text above this line was already correct about
+the principle; the code implemented its mirror image. That gap survived because
+the end-to-end test covering it fed a `.txt` file, which skips ASR entirely, and
+named it `dinner-with-kid.txt`, which tripped the heuristic by luck.
+
+**Where.** `pipeline.py:_route`, `pipeline.py:_asr_local_only`,
+`config.py:cloud_llm_permitted_by_every_profile`. Pinned by
+`tests/test_privacy_guarantees.py`.
 
 ---
 
@@ -189,6 +217,45 @@ not decoration. Read `COMPLIANCE.md` section 2 before editing them.
 
 ---
 
+## ADR-013: The index is a plain file, so it holds no plaintext
+
+**Decision.** For a recording whose governing profile encrypts at rest, the
+SQLite index stores metadata only. The transcript segments and the extracted
+analysis fields are withheld and marked as withheld. The vault artifact holds
+them. `DigestBuilder` decrypts on demand to render them.
+
+**Why.** `data/bridge.db` is an ordinary file with ordinary permissions that
+gets copied around with the rest of `data/`. Writing the verbatim transcript
+into it left an unencrypted copy of a maximum-sensitivity conversation sitting
+next to the encrypted one, which makes the vault decorative. Retention made it
+worse: the sweep unlinked the encrypted artifact and never touched the index, so
+after the 180-day husband window the encrypted copy was gone and the plaintext
+copy remained indefinitely.
+
+**Cost.** Rendering a digest for an encrypted profile now needs the passphrase.
+That is the correct trade and it is consistent with ADR-007: when the digest
+cannot decrypt, it says so in the section rather than rendering an empty one.
+
+---
+
+## ADR-014: Spend is counted wherever it is incurred
+
+**Decision.** LLM providers price their own calls from the token usage they
+report, using rates in `pipeline.yaml`. Routing cost is carried out of the
+router rather than discarded. Every exit path in `process_file` adds the
+recording's cost to the run total, including quarantine and failure.
+
+**Why.** `cost.halt_usd_per_run` is advertised as the thing that stops a runaway
+loop. It could only see ASR spend, because no LLM provider ever set `cost_usd`
+and the router dropped its response on the floor. A run that quarantined every
+file still paid for a routing call per recording and reported `$0.00`.
+
+**Constraint.** A provider with no configured rate contributes zero and logs
+that it is doing so, once. An invented number inside a spend guardrail is worse
+than a visible zero, because the zero is at least honest about not knowing.
+
+---
+
 ## Known limitations
 
 1. **Crosstalk breaks diarization.** When two people talk over each other,
@@ -196,21 +263,31 @@ not decoration. Read `COMPLIANCE.md` section 2 before editing them.
    Budget for it to be the thing that surprises you.
 
 2. **Plain-text transcript import has synthetic timestamps.** Imported `.txt`
-   has no real timeline, so one is generated at an average speaking rate. Do not
+   has no real timeline, so one is generated at an average speaking rate. The
+   timeline is monotonic and explicit `[MM:SS]` markers are honoured, but do not
    quote those timestamps as evidence of when something was said. `.srt` import
    carries real timestamps.
 
 3. **Redaction is regex.** See `COMPLIANCE.md` section 4.
 
-4. **Consent detection is phrase matching.** It catches common phrasings. Novel
-   phrasing produces a false quarantine, which is the safe direction. Add
-   patterns to `compliance/consent.py:_ANNOUNCE` if you find a gap.
+4. **Consent detection is phrase matching.** It catches common phrasings, treats
+   an objection anywhere in the window as decisive, and requires the
+   announcement to come from `diarization.owner_label` when that speaker can be
+   identified at all. Novel phrasing produces a false quarantine, which is the
+   safe direction. Add patterns to `compliance/consent.py` if you find a gap —
+   `_ANNOUNCE`, `_AGREE`, and `_REFUSE` are all worth growing.
 
-5. **Cost estimates are for ASR only.** LLM token costs are not modelled per
-   provider. `run.py status` shows what the providers reported, and the halt
-   threshold is the real guardrail.
+5. **LLM cost is modelled from configured rates, not billed amounts.** The rates
+   in `pipeline.yaml` are a guardrail, not an invoice, and they go stale. Verify
+   them against current published pricing before relying on the halt threshold.
+   Anthropic cache reads and writes are counted as plain input tokens, which is
+   close but not exact.
 
-6. **This runs on one machine.** No multi-device sync, no server. That is a
+6. **Speaker labels in imported text are inferred.** A `Name:` prefix is treated
+   as a speaker when it repeats or reads like a name. A one-off label that also
+   looks like a name will still be taken as a speaker.
+
+7. **This runs on one machine.** No multi-device sync, no server. That is a
    deliberate scope boundary, not an oversight.
 
 ---
@@ -218,8 +295,20 @@ not decoration. Read `COMPLIANCE.md` section 2 before editing them.
 ## Before you change something
 
 - [ ] Run `python -m pytest tests/ -q` first. Know the baseline is green.
-- [ ] If it touches routing, compliance, or providers, run the end-to-end tests
-      specifically. They encode guarantees that unit tests do not.
+- [ ] If it touches routing, compliance, or providers, run
+      `tests/test_privacy_guarantees.py` specifically. Every test in it
+      corresponds to a sentence the README states as a promise. A failure there
+      is a privacy regression, not a bug.
 - [ ] If you added a provider, verify `is_cloud` is correct.
+- [ ] If you added a stage that talks to a model, read
+      `rec.compliance.force_local_processing`. Do not recompute locality from a
+      profile you happen to be holding.
 - [ ] If you relaxed a compliance control, write a new ADR here explaining why.
       Future you will want the reasoning, not just the diff.
+
+A note on the ADRs above, several of which were rewritten after the code was
+audited against them. The documents were right and the code did not implement
+them, in four separate places, each of which read as reasonable in isolation.
+The lesson worth keeping: an architectural guarantee that no test asserts is a
+comment. If you write an ADR, write the test that fails when it stops being
+true.
