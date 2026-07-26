@@ -1,5 +1,61 @@
 # Changelog
 
+## Unreleased — getting things back out
+
+The pipeline could put recordings in. Little could get them out again.
+
+### Content search
+
+- `run.py search "own occupation" --content` searches what was actually said,
+  decrypting the vault where it has to, and prints the timestamp and speaker of
+  every hit. `--context N` widens each hit to the surrounding speech.
+- Search previously only matched filenames, which for a Plaud export means
+  matching `REC0042.wav`.
+- **It reports what it could not open and exits non-zero.** Returning fewer
+  results because a file would not decrypt is the worst failure a search over
+  your own archive can have: you conclude the phrase was never said.
+
+### Verify
+
+- `run.py verify` opens every artifact the index points at. Catches missing
+  files, silent corruption, and a wrong passphrase.
+- A locked vault reports encrypted artifacts as *unchecked*, not healthy. It
+  will not claim a clean bill it could not confirm.
+- Lists files on disk the index does not know about. Never deletes anything.
+
+### Forget
+
+- `run.py forget <id>` deletes one recording completely: vault artifacts,
+  outbox files, archived original, quarantine folder, index row. Shows the exact
+  file list and requires typing `FORGET`.
+- The audit entry survives, and is written before anything is removed. An audit
+  trail that forgets deletions is not a trail.
+- Previously the only way to remove a single recording was hand-editing SQLite.
+
+### Export
+
+- `run.py export` builds a document meant to leave the machine: redaction
+  applied, suppressed fields still never included, personal profiles refused
+  unless forced. `--transcripts` exports redacted transcripts instead of the
+  analysis; `--format html` for something printable.
+- The redaction footer prints even when nothing matched, because "no pattern
+  fired" is not the same as "nothing sensitive is in here".
+
+### Running it without remembering to
+
+- `run.py watch --interval 300` polls the inbox until you stop it.
+- README documents cron scheduling, including the failure mode where a cron job
+  without `PLAUD_BRIDGE_PASSPHRASE` transcribes and then refuses to write.
+- `make verify`, `make review`, `make week-html`.
+
+### Internal
+
+- `archive.py` is now the single path for reading stored content back. The rule
+  about where a recording's words live — payload when unencrypted, vault only
+  when encrypted — was about to be duplicated into four readers.
+
+---
+
 ## Unreleased — voice, templates, and the review cadence
 
 ### Voice

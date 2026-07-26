@@ -322,6 +322,23 @@ class Database:
             )
             return [dict(r) for r in cur.fetchall()]
 
+    def all_artifacts(self) -> list[dict[str, Any]]:
+        with self.tx() as cur:
+            cur.execute("SELECT * FROM artifacts ORDER BY recording_id, kind")
+            return [dict(r) for r in cur.fetchall()]
+
+    def delete_recording(self, recording_id: str) -> None:
+        """
+        Remove a recording and everything the index knows about it.
+
+        The audit rows are left alone on purpose. They carry no foreign key, so
+        they survive, and they should: "this recording was deleted, by a human,
+        at this time" is exactly the kind of thing an audit trail exists to
+        record. A trail that forgets deletions is not a trail.
+        """
+        with self.tx() as cur:
+            cur.execute("DELETE FROM recordings WHERE id=?", (recording_id,))
+
     def drop_artifact(self, recording_id: str, kind: str) -> None:
         with self.tx() as cur:
             cur.execute(

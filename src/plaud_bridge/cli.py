@@ -4,13 +4,16 @@ Plaud Bridge command line.
 
     plaud-bridge doctor                        preflight every dependency and key
     plaud-bridge run                           process everything in the inbox
+    plaud-bridge watch                         keep processing on an interval
     plaud-bridge digest                        combined digest, last 7 days
-    plaud-bridge digest --profile husband      one profile only
     plaud-bridge digest --format html          self-contained page, prints cleanly
     plaud-bridge review                        what the review cadence says is due
     plaud-bridge status                        index summary
-    plaud-bridge search "elimination period"   find recordings
+    plaud-bridge search "own occupation" --content    search what was actually said
     plaud-bridge open <recording_id>           decrypt and print an artifact
+    plaud-bridge verify                        confirm every artifact still opens
+    plaud-bridge export                        redacted document for someone else
+    plaud-bridge forget <recording_id>         delete one recording, permanently
     plaud-bridge audit                         read the compliance audit log
     plaud-bridge release <recording_id>        release a quarantined recording
     plaud-bridge retention --execute           delete expired artifacts
@@ -30,6 +33,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from . import __version__
+from .archive import Archive
 from .compliance import RetentionSweeper
 from .config import Config, ConfigError
 from .db import Database
@@ -234,10 +238,13 @@ def cmd_search(args) -> int:
     cfg = _load(args)
     db = Database(cfg.path("database"))
     try:
+        if args.content:
+            return _search_content(cfg, db, args)
+
         rows = db.query(profile_id=args.profile, since_days=args.days,
                         search=args.query, limit=args.limit)
         if not rows:
-            print("no matches")
+            print("no filename matches. Add --content to search what was said.")
             return 0
         print(f"\n{len(rows)} match(es)\n")
         for row in rows:
@@ -245,10 +252,264 @@ def cmd_search(args) -> int:
             lock = " [encrypted]" if row["encrypted"] else ""
             print(f"  {row['id']}  {when}  {row['duration_seconds'] / 60:5.1f}m  "
                   f"{row['governing_profile'] or '-':16s} {row['source_name']}{lock}")
-        print()
+        print("\nThat searched filenames. Add --content to search the transcripts.\n")
         return 0
     finally:
         db.close()
+
+
+def _search_content(cfg, db, args) -> int:
+    """Search what was said, decrypting the vault where it has to."""
+    archive = Archive(cfg, db)
+    matches, unopened = archive.search_content(
+        args.query, profile_id=args.profile, since_days=args.days,
+        limit=args.limit, context=args.context,
+    )
+
+    if not matches and not unopened:
+        print(f'\nnothing matching "{args.query}" was said in the window searched\n')
+        return 0
+
+    by_recording: dict[str, list] = {}
+    for match in matches:
+        by_recording.setdefault(match.recording_id, []).append(match)
+
+    print(f'\n{len(matches)} hit(s) across {len(by_recording)} recording(s) '
+          f'for "{args.query}"\n')
+    for recording_id, hits in by_recording.items():
+        head = hits[0]
+        tag = "  [personal]" if head.personal else ""
+        print(f"  {head.source_name}  ({head.when}, {head.profile_id or '-'}){tag}")
+        print(f"  {recording_id}")
+        for hit in hits[:args.per_recording]:
+            speaker = f"{hit.speaker}: " if hit.speaker and hit.speaker != "SPEAKER" else ""
+            print(f"      [{hit.stamp}] {speaker}{hit.text[:220]}")
+        if len(hits) > args.per_recording:
+            print(f"      ... {len(hits) - args.per_recording} more in this recording")
+        print()
+
+    if unopened:
+        # Never let a search quietly under-report. Concluding a phrase was never
+        # said, when really the file would not open, is the worst outcome here.
+        print(f"{len(unopened)} recording(s) could not be opened and were NOT searched:")
+        for entry in unopened[:20]:
+            print(f"  {entry}")
+        print("  Set PLAUD_BRIDGE_PASSPHRASE if these are encrypted.\n")
+        return 2
+    return 0
+
+
+def cmd_verify(args) -> int:
+    """
+    Check that everything the index points at still exists and still opens.
+
+    An encrypted archive you have never tried to decrypt is an archive you might
+    already have lost. This is the command that tells you before it matters.
+    """
+    cfg = _load(args)
+    db = Database(cfg.path("database"))
+    try:
+        report = Archive(cfg, db).verify()
+        print("\n" + report.render() + "\n")
+        return 0 if report.healthy else 1
+    finally:
+        db.close()
+
+
+def cmd_forget(args) -> int:
+    """Delete one recording and everything belonging to it."""
+    cfg = _load(args)
+    db = Database(cfg.path("database"))
+    try:
+        payload = db.load(args.recording_id)
+        targets = Archive(cfg, db).plan_forget(args.recording_id)
+        if payload is None and not targets:
+            print(f"no recording with id {args.recording_id}")
+            return 1
+
+        name = (payload or {}).get("source_name", "(not in the index)")
+        print(f"\nAbout to permanently delete {args.recording_id}")
+        print(f"  {name}\n")
+        for path in targets:
+            print(f"  {path}")
+        if not targets:
+            print("  (no files on disk; the index entry will be removed)")
+        print("\nThe audit log keeps a record that this was deleted. Nothing else survives.")
+
+        if not args.yes:
+            answer = input("\nType FORGET to confirm: ").strip()
+            if answer != "FORGET":
+                print("aborted")
+                return 1
+
+        removed, failures = Archive(cfg, db).forget(args.recording_id)
+        print(f"\ndeleted {removed} file(s) and the index entry")
+        for failure in failures:
+            print(f"  could not delete {failure}")
+        return 1 if failures else 0
+    finally:
+        db.close()
+
+
+def cmd_export(args) -> int:
+    """
+    Build something you can hand to another person.
+
+    The digest is written for you and assumes you are the only reader. This is
+    the opposite: redaction is applied, personal profiles are refused unless you
+    force them, and the result is a plain file with no links back into the vault.
+    """
+    cfg = _load(args)
+    db = Database(cfg.path("database"))
+    try:
+        from .compliance import ComplianceGate
+
+        if args.profile and args.profile not in cfg.profiles:
+            print(f"unknown profile '{args.profile}'. Known: {sorted(cfg.profiles)}")
+            return 1
+
+        personal = {p.id for p in cfg.profiles.values() if p.exclude_from_combined_export}
+        if args.profile in personal and not args.include_personal:
+            print(
+                f"\n'{args.profile}' is a personal profile and is excluded from exports "
+                "by default.\nAn export is a document meant to leave this machine. "
+                "Pass --include-personal if\nthat is genuinely what you want.\n"
+            )
+            return 1
+
+        archive = Archive(cfg, db)
+        gate = ComplianceGate(cfg)
+        rows = db.query(profile_id=args.profile, since_days=args.days, limit=args.limit)
+
+        included, skipped, unopened = [], [], []
+        for row in rows:
+            governing = row["governing_profile"] or ""
+            if governing in personal and not args.include_personal:
+                skipped.append(row["source_name"])
+                continue
+            record = archive.full_record(row)
+            if record is None:
+                unopened.append(row["source_name"])
+                continue
+            included.append((row, record))
+
+        if not included:
+            print("nothing to export in that window")
+            return 0
+
+        out: list[str] = [
+            f"# {args.title or 'Export'}",
+            "",
+            f"{len(included)} recording(s). Redacted for sharing. "
+            "Generated by plaud-bridge.",
+            "",
+        ]
+        redaction_total: dict[str, int] = {}
+
+        for row, record in included:
+            profile = cfg.profile(row["governing_profile"]) if row["governing_profile"] in cfg.profiles else None
+            when = (row["recorded_at"] or row["ingested_at"] or "")[:16].replace("T", " ")
+            out += [f"## {row['source_name']}", "", f"`{when}`", ""]
+
+            if args.transcripts:
+                segments = (record.get("transcript") or {}).get("segments") or []
+                body = "\n".join(
+                    f"[{_stamp(float(s.get('start', 0)))}] {s.get('speaker', '')}: {s.get('text', '')}"
+                    for s in segments
+                )
+                redacted, counts = gate.redact_for_llm(body, profile) if profile else (body, {})
+                for key, value in counts.items():
+                    redaction_total[key] = redaction_total.get(key, 0) + value
+                out += ["```", redacted, "```", ""]
+                continue
+
+            for analysis in record.get("analyses", []):
+                pid = analysis.get("profile_id", "")
+                if pid not in cfg.profiles:
+                    continue
+                section = cfg.profile(pid)
+                out += [f"### {section.name}", ""]
+                for spec in section.fields:
+                    # Suppressed fields never leave, and an export is the last
+                    # place to make an exception.
+                    if spec.key in section.suppress_fields:
+                        continue
+                    values = analysis.get("fields", {}).get(spec.key)
+                    if not values:
+                        continue
+                    rendered = json.dumps(values, ensure_ascii=False) if isinstance(values, (dict, list)) else str(values)
+                    redacted, counts = gate.redact_for_llm(rendered, section)
+                    for key, value in counts.items():
+                        redaction_total[key] = redaction_total.get(key, 0) + value
+                    out += [f"**{spec.label}**", "", redacted, ""]
+
+        # The caveat prints whether or not anything matched. Zero matches means
+        # no pattern fired, which is not the same as nothing sensitive being
+        # present, and an export with no note reads as an export that was
+        # cleared by something.
+        if redaction_total or args.transcripts:
+            found = (
+                "Redacted before export: "
+                + ", ".join(f"{k} ({v})" for k, v in sorted(redaction_total.items()))
+                if redaction_total
+                else "No redaction pattern matched anything in this export"
+            )
+            out += ["---", "",
+                    f"<sub>{found}. Redaction is pattern matching, not a guarantee. "
+                    "Read this before you send it.</sub>", ""]
+        if skipped:
+            out += [f"<sub>{len(skipped)} personal recording(s) omitted.</sub>", ""]
+
+        body = "\n".join(out)
+        if args.format == "html":
+            body = to_html(body, title=args.title or "Export")
+
+        if args.out:
+            dest = Path(args.out)
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_text(body, encoding="utf-8")
+            print(f"wrote {dest}")
+        else:
+            print(body)
+
+        if unopened:
+            print(f"\n{len(unopened)} recording(s) could not be decrypted and were omitted.",
+                  file=sys.stderr)
+            return 2
+        return 0
+    finally:
+        db.close()
+
+
+def cmd_watch(args) -> int:
+    """Process the inbox, then keep doing it. Ctrl-C to stop."""
+    import time
+
+    cfg = _load(args)
+    print(f"\nwatching {cfg.path('inbox')} every {args.interval}s. Ctrl-C to stop.\n")
+    runs = 0
+    while True:
+        pipe = Pipeline(cfg)
+        try:
+            stats = pipe.run()
+            runs += 1
+            if stats.processed or stats.quarantined or stats.failed:
+                print(f"[{datetime.now(timezone.utc):%H:%M:%S}] {stats.summary()}")
+            if args.once or (args.max_runs and runs >= args.max_runs):
+                return 0 if stats.failed == 0 else 2
+        finally:
+            pipe.close()
+        try:
+            time.sleep(args.interval)
+        except KeyboardInterrupt:
+            print("\nstopped")
+            return 0
+
+
+def _stamp(seconds: float) -> str:
+    minutes, secs = divmod(int(seconds), 60)
+    hours, minutes = divmod(minutes, 60)
+    return f"{hours:02d}:{minutes:02d}:{secs:02d}" if hours else f"{minutes:02d}:{secs:02d}"
 
 
 def cmd_open(args) -> int:
@@ -637,12 +898,45 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("status", help="index summary")
     p.set_defaults(func=cmd_status)
 
-    p = sub.add_parser("search", help="find recordings by filename")
+    p = sub.add_parser("search", help="find recordings by filename, or by what was said")
     p.add_argument("query")
+    p.add_argument("--content", action="store_true",
+                   help="search inside the transcripts, decrypting where needed")
+    p.add_argument("--context", type=int, default=0,
+                   help="segments of surrounding speech to include (with --content)")
+    p.add_argument("--per-recording", type=int, default=5,
+                   help="hits to show per recording before summarising the rest")
     p.add_argument("--profile", default=None)
     p.add_argument("--days", type=int, default=None)
     p.add_argument("--limit", type=int, default=50)
     p.set_defaults(func=cmd_search)
+
+    p = sub.add_parser("verify", help="check every artifact still exists and still opens")
+    p.set_defaults(func=cmd_verify)
+
+    p = sub.add_parser("forget", help="permanently delete one recording and its artifacts")
+    p.add_argument("recording_id")
+    p.add_argument("--yes", action="store_true", help="skip the confirmation prompt")
+    p.set_defaults(func=cmd_forget)
+
+    p = sub.add_parser("export", help="build a redacted document for someone else")
+    p.add_argument("--profile", default=None)
+    p.add_argument("--days", type=int, default=30)
+    p.add_argument("--limit", type=int, default=50)
+    p.add_argument("--transcripts", action="store_true",
+                   help="export redacted transcripts instead of the analysis")
+    p.add_argument("--include-personal", action="store_true",
+                   help="include profiles normally excluded from anything shareable")
+    p.add_argument("--format", default="markdown", choices=["markdown", "html"])
+    p.add_argument("--out", default=None)
+    p.add_argument("--title", default=None)
+    p.set_defaults(func=cmd_export)
+
+    p = sub.add_parser("watch", help="process the inbox on an interval")
+    p.add_argument("--interval", type=int, default=300, help="seconds between runs")
+    p.add_argument("--once", action="store_true", help="run a single pass and exit")
+    p.add_argument("--max-runs", type=int, default=None)
+    p.set_defaults(func=cmd_watch)
 
     p = sub.add_parser("open", help="print an artifact, decrypting if needed")
     p.add_argument("recording_id")

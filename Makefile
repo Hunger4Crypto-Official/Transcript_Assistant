@@ -1,4 +1,4 @@
-.PHONY: help setup doctor run digest week test clean
+.PHONY: help setup doctor run digest week verify review test clean
 
 help:
 	@echo "make setup    install dependencies"
@@ -6,6 +6,8 @@ help:
 	@echo "make run      process the inbox"
 	@echo "make digest   combined digest to stdout"
 	@echo "make week     write this week's digest to data/outbox"
+	@echo "make verify   confirm every artifact still opens"
+	@echo "make review   what the review cadence says is due"
 	@echo "make test     run the test suite"
 	@echo "make clean    remove work scratch and caches"
 
@@ -23,6 +25,15 @@ digest:
 
 week:
 	python run.py digest --days 7 --out data/outbox/digest-$$(date +%Y-%m-%d).md
+
+week-html:
+	python run.py digest --days 7 --format html --out data/outbox/digest-$$(date +%Y-%m-%d).html
+
+verify:
+	python run.py verify
+
+review:
+	python run.py review
 
 test:
 	python -m pytest tests/ -q

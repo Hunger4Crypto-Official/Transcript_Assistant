@@ -74,7 +74,12 @@ Other commands:
 |---|---|
 | `run.py doctor` | Preflight every dependency, key, and profile |
 | `run.py status` | Index summary: counts, hours, spend |
-| `run.py search "elimination period"` | Find recordings |
+| `run.py watch` | Process the inbox on an interval until you stop it |
+| `run.py search "elimination period"` | Find recordings by filename |
+| `run.py search "own occupation" --content` | **Search what was actually said** |
+| `run.py verify` | Confirm every artifact still exists and still decrypts |
+| `run.py export --days 30` | Build a redacted document for someone else |
+| `run.py forget <id>` | Permanently delete one recording |
 | `run.py open <id>` | Decrypt and print a transcript |
 | `run.py open <id> --kind analysis` | Decrypt and print the structured analysis |
 | `run.py audit` | Read the compliance audit log |
@@ -209,6 +214,86 @@ edit cannot reach them.
 
 ---
 
+## Getting things back out
+
+An archive you cannot search is a filing cabinet you cannot open.
+
+```bash
+python run.py search "own occupation" --content
+python run.py search "biopsy" --content --profile husband --context 2
+```
+
+`--content` searches what was said, decrypting the vault where it has to, and
+prints the timestamp and speaker of every hit. **If a recording cannot be
+decrypted it says so and exits non-zero** rather than returning fewer results —
+concluding a phrase was never said, when really the file would not open, is the
+worst thing a search over your own archive can do to you.
+
+### Verify
+
+```bash
+python run.py verify
+```
+
+Opens every artifact the index points at. Missing files, silent corruption, and
+a wrong passphrase all show up here. **An encrypted archive you have never tried
+to decrypt is one you might already have lost** — this is the command that tells
+you while it is still fixable. It also lists files on disk the index does not
+know about, and never deletes anything.
+
+If the vault is locked it reports encrypted artifacts as *unchecked*, not as
+healthy. It will not claim a clean bill it could not confirm.
+
+### Export
+
+```bash
+python run.py export --days 30 --out handover.md
+python run.py export --days 30 --transcripts --format html --out notes.html
+```
+
+The digest is written for you and assumes you are the only reader. An export is
+the opposite: redaction applied, suppressed fields still never included,
+personal profiles refused unless you pass `--include-personal`, and a footer
+that states plainly that redaction is pattern matching rather than a guarantee.
+That footer prints even when nothing matched, because "no pattern fired" is not
+the same as "nothing sensitive is in here".
+
+### Forget
+
+```bash
+python run.py forget rec_1a2b3c4d
+```
+
+Deletes one recording completely: vault artifacts, outbox files, the archived
+original, the quarantine folder, and the index entry. It shows you the exact
+file list and requires you to type `FORGET`.
+
+The audit log keeps a record that the deletion happened, by a human, at a time.
+Everything else goes. An audit trail that forgets deletions is not a trail.
+
+---
+
+## Running it without remembering to
+
+```bash
+python run.py watch --interval 300     # poll the inbox until you stop it
+```
+
+Or hand it to your scheduler. `run` is idempotent — content-hash dedupe means a
+file already processed is skipped, so running it too often costs nothing:
+
+```cron
+*/15 * * * *  cd /path/to/plaud-bridge && .venv/bin/plaud-bridge run
+0    7 * * 1  cd /path/to/plaud-bridge && .venv/bin/plaud-bridge digest --days 7 --format html --out data/outbox/week.html
+0    9 1 * *  cd /path/to/plaud-bridge && .venv/bin/plaud-bridge review
+```
+
+The passphrase has to reach the process. A cron job with no
+`PLAUD_BRIDGE_PASSPHRASE` will transcribe and then refuse to write anything
+encrypted, which is the correct failure but a confusing one to debug at 7am.
+
+---
+
 ## The review cadence
 
 `COMPLIANCE.md` asks you to read certain things weekly, monthly, quarterly, and
@@ -274,7 +359,7 @@ which means the halt threshold cannot see it.
 python -m pytest tests/ -q
 ```
 
-106 tests, no network and no API keys required.
+128 tests, no network and no API keys required.
 
 The ones that matter most are in **`test_privacy_guarantees.py`**. Every test
 there corresponds to a sentence this README states as a promise: a family

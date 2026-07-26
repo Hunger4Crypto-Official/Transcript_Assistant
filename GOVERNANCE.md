@@ -300,6 +300,46 @@ persona set register; they are not allowed to argue with a rule.
 
 ---
 
+## ADR-017: One decryption path
+
+**Decision.** Everything that reads stored content back — content search,
+verification, export, deletion — goes through `archive.py`. The digest is the
+one exception and it is on the list to fold in.
+
+**Why.** A recording's words live in one of two places depending on its
+governing profile: in the SQLite payload when it is not encrypted, and only in
+the vault when it is (ADR-013). Every reader has to know that rule. Four copies
+of it is four chances for one to forget the encrypted case and silently return
+nothing, which reads to the user as "that was never said".
+
+**The rule for readers.** Under-reporting is worse than failing. `search_content`
+returns matches *and* a list of what it could not open, and the command exits
+non-zero when that list is non-empty. `verify` marks a locked vault's artifacts
+as `unchecked` rather than omitting them, because reporting "0 artifacts
+indexed" when there are twelve is how someone concludes an archive is fine when
+nothing was looked at.
+
+---
+
+## ADR-018: Deletion is a first-class operation, and the audit survives it
+
+**Decision.** `forget <id>` removes the vault artifacts, outbox files, archived
+original, quarantine folder, and index row for one recording. The audit entries
+for that recording stay.
+
+**Why deletion at all.** Retention sweeps on a schedule; that is not the same as
+being able to remove one specific conversation because someone asked you to, or
+because it should never have been recorded. Without this the only way to delete
+a single recording was hand-editing SQLite, which nobody does correctly at 11pm.
+
+**Why the audit stays.** The `audit` table deliberately has no foreign key onto
+`recordings`, so rows survive the delete. "This recording was deleted, by a
+human, at this time" is exactly what an audit trail is for. A trail that forgets
+deletions is not a trail. The entry is written *before* the files are removed,
+so a crash halfway through still leaves evidence.
+
+---
+
 ## Known limitations
 
 1. **Crosstalk breaks diarization.** When two people talk over each other,
