@@ -6,6 +6,8 @@ Plaud Bridge, without installing anything.
     python run.py run                           process everything in the inbox
     python run.py digest                        combined digest, last 7 days
     python run.py digest --profile husband      one profile only
+    python run.py digest --format html          self-contained page, prints cleanly
+    python run.py review                        what the review cadence says is due
     python run.py status                        index summary
     python run.py search "elimination period"   find recordings
     python run.py open <recording_id>           decrypt and print an artifact
@@ -13,6 +15,8 @@ Plaud Bridge, without installing anything.
     python run.py release <recording_id>        release a quarantined recording
     python run.py retention --execute           delete expired artifacts
     python run.py profiles                      show the routing table
+    python run.py new-profile <id>              scaffold a profile from the template
+    python run.py voices                        show installed voice packs
 
 The commands live in `src/plaud_bridge/cli.py`. This shim exists so the tool
 works straight out of a `git clone` with nothing installed but PyYAML and

@@ -58,6 +58,12 @@ routing:
     conversations here simply because she is present.
 
 extraction:
+  persona: >
+    You are keeping a shared ledger, not writing about a marriage. Record what
+    was agreed and what was asked for, in the words used. Two people running a
+    household need to remember who said they would call the plumber; they do
+    not need a third party's reading of how the conversation went.
+
   system_prompt: >
     You are helping a husband keep track of shared commitments and plans.
     Extract only what was actually said.
@@ -110,6 +116,11 @@ extraction:
 digest:
   heading: "Home"
   priority: 4
+  intro: >
+    What she asked for comes first, on purpose. It is the field you will
+    actually use, and the one most likely to be the reason something went wrong.
+  empty: >
+    Nothing here this window.
   highlight_fields: ["she_asked_for", "commitments_i_made", "next_action"]
   suppress_fields: []
   exclude_from_combined_export: true

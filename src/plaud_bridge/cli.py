@@ -6,6 +6,8 @@ Plaud Bridge command line.
     plaud-bridge run                           process everything in the inbox
     plaud-bridge digest                        combined digest, last 7 days
     plaud-bridge digest --profile husband      one profile only
+    plaud-bridge digest --format html          self-contained page, prints cleanly
+    plaud-bridge review                        what the review cadence says is due
     plaud-bridge status                        index summary
     plaud-bridge search "elimination period"   find recordings
     plaud-bridge open <recording_id>           decrypt and print an artifact
@@ -13,6 +15,8 @@ Plaud Bridge command line.
     plaud-bridge release <recording_id>        release a quarantined recording
     plaud-bridge retention --execute           delete expired artifacts
     plaud-bridge profiles                      show the routing table
+    plaud-bridge new-profile <id>              scaffold a profile from the template
+    plaud-bridge voices                        show installed voice packs
 
 `python run.py <command>` runs the same code without installing anything.
 """
@@ -20,17 +24,20 @@ Plaud Bridge command line.
 from __future__ import annotations
 
 import argparse
+import json
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 from . import __version__
 from .compliance import RetentionSweeper
 from .config import Config, ConfigError
 from .db import Database
-from .digest import DigestBuilder, DigestOptions
+from .digest import DigestBuilder, DigestOptions, to_html
 from .logging_setup import setup
 from .pipeline import Pipeline
 from .storage import Vault, VaultError
+from .voice import Voice
 
 OK, WARN, BAD = "  ok  ", " warn ", " FAIL "
 
@@ -179,13 +186,23 @@ def cmd_digest(args) -> int:
         )
         markdown = DigestBuilder(cfg, db).render_markdown(opts)
 
+        # HTML is rendered from the markdown rather than from the section data,
+        # so the two formats cannot drift into saying different things.
+        if args.format == "html":
+            title = opts.title or (
+                cfg.profile(opts.profile_id).name if opts.profile_id else "Digest"
+            )
+            body = to_html(markdown, title=title)
+        else:
+            body = markdown
+
         if args.out:
             dest = Path(args.out)
             dest.parent.mkdir(parents=True, exist_ok=True)
-            dest.write_text(markdown, encoding="utf-8")
+            dest.write_text(body, encoding="utf-8")
             print(f"wrote {dest}")
         else:
-            print(markdown)
+            print(body)
         return 0
     finally:
         db.close()
@@ -372,6 +389,197 @@ def cmd_retention(args) -> int:
         db.close()
 
 
+def cmd_new_profile(args) -> int:
+    """Scaffold a profile from the documented template."""
+    cfg_dir = Path(args.config)
+    template = cfg_dir / "profiles" / "_TEMPLATE.yaml"
+    if not template.exists():
+        print(f"template not found: {template}")
+        return 1
+
+    pid = args.profile_id.strip()
+    if not pid.isidentifier() or pid.startswith("_"):
+        print(f"'{pid}' must be a valid Python identifier and not start with an underscore")
+        return 1
+
+    dest = cfg_dir / "profiles" / f"{pid}.yaml"
+    if dest.exists():
+        print(f"{dest} already exists. Pick another id or edit that file.")
+        return 1
+
+    name = args.name or pid.replace("_", " ").title()
+    body = (
+        template.read_text(encoding="utf-8")
+        .replace('id: "PROFILE_ID"', f'id: {pid}')
+        .replace('name: "Profile Name"', f'name: "{name}"')
+        .replace('short_name: "Short"', f'short_name: "{args.short_name or name}"')
+        .replace('heading: "Section Heading"', f'heading: "{args.heading or name}"')
+    )
+    dest.write_text(body, encoding="utf-8")
+
+    print(f"\nwrote {dest}\n")
+    print("Next:")
+    print("  1. Edit it. The routing keywords and llm_hint are what make it work;")
+    print("     an empty keyword list means the router has nothing to go on.")
+    print("  2. Read the sensitivity and processing blocks before your first run.")
+    print("  3. python run.py profiles      confirm it loaded")
+    print("  4. python run.py doctor        confirm nothing else broke")
+    print("\nIt will not route anything until you give it keywords.\n")
+    return 0
+
+
+def cmd_voices(args) -> int:
+    """Show the installed voice packs and which one is active."""
+    cfg = _load(args)
+    active = cfg.voice.id
+    packs = Voice.available(Path(args.config) / "voice")
+
+    print(f"\nactive voice: {cfg.voice.name} ({active})\n")
+    if not packs:
+        print("  no voice packs found; using the built-in defaults\n")
+        return 0
+    for pid, name, description in packs:
+        marker = "*" if pid == active else " "
+        print(f" {marker} {pid:10s} {name}")
+        if description:
+            print(f"              {description}")
+    print("\nSet voice.preset in pipeline.yaml to switch. Override individual")
+    print("strings with voice.overrides without copying a whole pack.\n")
+    return 0
+
+
+def cmd_review(args) -> int:
+    """
+    The review cadence from COMPLIANCE.md section 9, as a command.
+
+    That section asks you to read certain things weekly, monthly, quarterly, and
+    annually. Asking a person to remember a four-tier schedule is asking them to
+    stop doing it by March, so this assembles all four and says which are due.
+    """
+    cfg = _load(args)
+    db = Database(cfg.path("database"))
+    try:
+        if args.reaffirm:
+            if args.reaffirm not in cfg.profiles:
+                print(f"unknown profile '{args.reaffirm}'. Known: {sorted(cfg.profiles)}")
+                return 1
+            profile = cfg.profile(args.reaffirm)
+            if not profile.consent_gate_key:
+                print(f"profile '{profile.id}' has no standing consent block to reaffirm")
+                return 1
+            print(f"\n{profile.name}: {profile.consent_gate_key}")
+            print("\n  This is not a formality. Confirm the people on these recordings")
+            print("  still know the device records and are still fine with it.\n")
+            answer = input("Type YES to record the reaffirmation: ").strip()
+            if answer != "YES":
+                print("not recorded")
+                return 1
+            db.audit("consent_reaffirm", profile.id, actor="human")
+            print(f"recorded. Next due in {profile.reaffirm_every_days} days.\n")
+            return 0
+
+        now = datetime.now(timezone.utc)
+        due: list[str] = []
+
+        print(f"\nReview :: {now:%Y-%m-%d}\n")
+
+        # --- standing consent, per profile -------------------------------
+        print("Standing consent")
+        # audit_log is newest first, so setdefault keeps the most recent
+        # reaffirmation per profile. A dict comprehension would keep the oldest
+        # and tell you something was overdue forever.
+        reaffirmations: dict[str, str] = {}
+        for row in db.audit_log(action="consent_reaffirm", limit=500):
+            reaffirmations.setdefault(row["detail"], row["at"])
+        any_gate = False
+        for pid in sorted(cfg.profiles):
+            profile = cfg.profile(pid)
+            if not profile.consent_gate_key or profile.reaffirm_every_days <= 0:
+                continue
+            any_gate = True
+            last = reaffirmations.get(pid)
+            if last is None:
+                print(f"  [DUE] {profile.name:18s} never reaffirmed")
+                due.append(f"run.py review --reaffirm {pid}")
+                continue
+            age = (now - datetime.fromisoformat(last)).days
+            if age >= profile.reaffirm_every_days:
+                print(f"  [DUE] {profile.name:18s} last {age}d ago "
+                      f"(every {profile.reaffirm_every_days}d)")
+                due.append(f"run.py review --reaffirm {pid}")
+            else:
+                remaining = profile.reaffirm_every_days - age
+                print(f"  [ ok] {profile.name:18s} last {age}d ago, next in {remaining}d")
+        if not any_gate:
+            print("  no profiles carry a standing consent block")
+
+        # --- weekly: statements needing review ---------------------------
+        print(f"\nStatements needing review (last {args.days} days)")
+        flagged = 0
+        for pid in sorted(cfg.profiles):
+            if "statements_needing_review" not in cfg.profile(pid).field_keys:
+                continue
+            for row in db.query(profile_id=pid, since_days=args.days, limit=200):
+                payload = json.loads(row["payload_json"])
+                for analysis in payload.get("analyses", []):
+                    if analysis.get("profile_id") != pid:
+                        continue
+                    if analysis.get("fields_withheld"):
+                        print(f"  [enc] {row['source_name']}  "
+                              f"run.py open {row['id']} --kind analysis")
+                        flagged += 1
+                        continue
+                    items = analysis.get("fields", {}).get("statements_needing_review") or []
+                    for item in items:
+                        flagged += 1
+                        print(f"  [!!] {row['source_name']}: "
+                              f"{str(item)[:110]}")
+        if not flagged:
+            print("  nothing flagged")
+
+        # --- monthly: unfiled keyword harvest ----------------------------
+        fallback = cfg.get("routing.fallback_profile", "unfiled")
+        print(f"\nUnfiled recordings (last {args.days} days)")
+        suggestions: dict[str, int] = {}
+        unfiled_rows = db.query(profile_id=fallback, since_days=args.days, limit=200)
+        for row in unfiled_rows:
+            payload = json.loads(row["payload_json"])
+            for analysis in payload.get("analyses", []):
+                if analysis.get("profile_id") != fallback:
+                    continue
+                for word in analysis.get("fields", {}).get("suggested_keywords") or []:
+                    key = str(word).strip().lower()
+                    if key:
+                        suggestions[key] = suggestions.get(key, 0) + 1
+        print(f"  {len(unfiled_rows)} recording(s) the router could not place")
+        if suggestions:
+            top = sorted(suggestions.items(), key=lambda kv: -kv[1])[:15]
+            print("  keywords worth adding to a profile:")
+            print("    " + ", ".join(f"{w} ({n})" for w, n in top))
+            due.append("add the keywords above to the right profile's routing.keywords")
+        elif unfiled_rows:
+            print("  no keyword suggestions; read them with `run.py search`")
+
+        # --- quarterly: retention ----------------------------------------
+        print("\nRetention")
+        plan = RetentionSweeper(cfg, db).plan(dry_run=True)
+        if plan.items:
+            print(f"  {len(plan.items)} artifact(s) past their expiry, "
+                  f"{plan.total_bytes / 1_048_576:.1f} MB")
+            due.append("run.py retention --execute")
+        else:
+            print("  nothing has expired")
+
+        # --- what to do --------------------------------------------------
+        print("\nDue now" if due else "\nNothing is due.")
+        for item in due:
+            print(f"  - {item}")
+        print()
+        return 0
+    finally:
+        db.close()
+
+
 def cmd_profiles(args) -> int:
     cfg = _load(args)
     print(f"\n{len(cfg.profiles)} profile(s)\n")
@@ -421,6 +629,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--include-personal", action="store_true",
                    help="include father/husband in a combined digest")
     p.add_argument("--out", default=None, help="write to a file instead of stdout")
+    p.add_argument("--format", default="markdown", choices=["markdown", "html"],
+                   help="html is self-contained and prints cleanly")
     p.add_argument("--title", default=None)
     p.set_defaults(func=cmd_digest)
 
@@ -462,6 +672,22 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("profiles", help="show the routing table")
     p.set_defaults(func=cmd_profiles)
+
+    p = sub.add_parser("new-profile", help="scaffold a profile from the template")
+    p.add_argument("profile_id", help="identifier and filename stem, e.g. mentor")
+    p.add_argument("--name", default=None, help='display name, e.g. "Mentor"')
+    p.add_argument("--short-name", default=None)
+    p.add_argument("--heading", default=None, help="how it appears in the digest")
+    p.set_defaults(func=cmd_new_profile)
+
+    p = sub.add_parser("voices", help="show installed voice packs")
+    p.set_defaults(func=cmd_voices)
+
+    p = sub.add_parser("review", help="the COMPLIANCE.md review cadence, assembled")
+    p.add_argument("--days", type=int, default=30, help="lookback window (default 30)")
+    p.add_argument("--reaffirm", default=None, metavar="PROFILE",
+                   help="record a standing-consent reaffirmation for a profile")
+    p.set_defaults(func=cmd_review)
 
     return ap
 

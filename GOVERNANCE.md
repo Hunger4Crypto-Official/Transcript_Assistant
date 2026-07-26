@@ -256,6 +256,50 @@ than a visible zero, because the zero is at least honest about not knowing.
 
 ---
 
+## ADR-015: Voice is config; structure is code
+
+**Decision.** Every user-facing string in the digest comes from a voice pack in
+`config/voice/`. What renders, in what order, and under what conditions stays in
+`digest/builder.py`. There is no template language and packs cannot introduce
+control flow.
+
+**Why not a real template engine.** The digest is the document most likely to be
+forwarded, pasted into a message, or opened on a shared screen, and its renderer
+is where three compliance rules are enforced: suppressed fields never print,
+personal profiles are omitted from the combined view, and encrypted analyses are
+decrypted on demand rather than mirrored into the index. A template able to
+reorder or re-emit sections is a template able to defeat all three. Trading that
+for layout flexibility is a bad trade in this specific document.
+
+**Why it cannot fail.** `voice.py` carries the complete default set, and a pack
+is a deep merge over it. A partial pack is valid, a missing pack falls back with
+a warning, a corrupt pack falls back with a warning, and an unknown placeholder
+renders empty. A typo in a voice file should make the digest look slightly
+wrong, never lose you the digest.
+
+**Where.** `voice.py`, `config/voice/*.yaml`, and per-profile `digest.intro`,
+`digest.empty`, `extraction.persona`. Pinned by
+`tests/test_voice_and_templates.py`, including a test that an override cannot
+print a suppressed field.
+
+---
+
+## ADR-016: Prompt layering puts the constraints last
+
+**Decision.** An extraction prompt is assembled in three layers: the voice
+pack's `analysis.house_style`, then the profile's `extraction.persona`, then the
+profile's `extraction.system_prompt`.
+
+**Why that order.** The hard constraints on the family profiles — no
+psychological assessment of a child, no fault-finding in a marital
+disagreement — live in `system_prompt`. Putting them last places them nearest
+the task and means nothing configured above can dilute them. House style and
+persona set register; they are not allowed to argue with a rule.
+
+**If you add a layer**, add it above, not below.
+
+---
+
 ## Known limitations
 
 1. **Crosstalk breaks diarization.** When two people talk over each other,

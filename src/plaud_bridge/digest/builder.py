@@ -239,25 +239,34 @@ class DigestBuilder:
     # ---- rendering ------------------------------------------------------
     def render_markdown(self, opts: DigestOptions) -> str:
         sections = self._collect(opts)
+        voice = self.cfg.voice
         now = datetime.now(timezone.utc)
         start = now - timedelta(days=opts.days)
 
-        title = opts.title or (
-            f"{self.cfg.profile(opts.profile_id).name} Digest"
-            if opts.profile_id
-            else "Digest"
-        )
+        if opts.title:
+            title = opts.title
+        elif opts.profile_id:
+            profile = self.cfg.profile(opts.profile_id)
+            title = voice.text(
+                "digest.profile_title",
+                profile_name=profile.name,
+                profile_short=profile.short_name,
+            )
+        else:
+            title = voice.text("digest.title")
 
         out: list[str] = [
             f"# {title}",
             "",
-            f"**Window:** {start:%Y-%m-%d} to {now:%Y-%m-%d} ({opts.days} days)  ",
-            f"**Generated:** {now:%Y-%m-%d %H:%M} UTC",
+            voice.text("digest.window", start=f"{start:%Y-%m-%d}",
+                       end=f"{now:%Y-%m-%d}", days=opts.days),
+            voice.text("digest.generated", generated=f"{now:%Y-%m-%d %H:%M}"),
             "",
         ]
+        out += voice.lines("digest.opening")
 
         if not sections:
-            out += ["No recordings in this window.", ""]
+            out += [self._empty_note(opts, voice), ""]
             return "\n".join(out)
 
         # --- what needs you first ----------------------------------------
@@ -272,32 +281,53 @@ class DigestBuilder:
                     actions.append((section.heading, entry["name"], na.strip()))
 
         if attention or actions:
-            out += ["## Needs You", ""]
+            out += [f"## {voice.text('digest.needs_you.heading')}", ""]
+            out += voice.lines("digest.needs_you.intro")
             for section, entry in attention:
-                why = "flagged for human review" if entry["attention"] else f"error: {entry['error'][:120]}"
-                out.append(f"- **{section.heading}** :: `{entry['name']}` {why}")
+                why = (
+                    voice.text("digest.needs_you.why_flagged")
+                    if entry["attention"]
+                    else voice.text("digest.needs_you.why_error", error=entry["error"][:120])
+                )
+                out.append(voice.text(
+                    "digest.needs_you.attention_line",
+                    section=section.heading, name=entry["name"], why=why,
+                ))
             for heading, name, action in actions[:20]:
-                out.append(f"- **{heading}** :: {action}  \n  <sub>{name}</sub>")
+                out.append(voice.text(
+                    "digest.needs_you.action_line",
+                    section=heading, name=name, action=action,
+                ))
             out.append("")
 
         # --- overview table ----------------------------------------------
         out += [
-            "## At a Glance",
+            f"## {voice.text('digest.glance.heading')}",
             "",
-            "| Section | Recordings | Minutes |",
+            voice.text("digest.glance.columns"),
             "|---|---:|---:|",
         ]
         for section in sections:
             mins = sum(e["minutes"] for e in section.entries)
-            out.append(f"| {section.heading} | {len(section.entries)} | {mins:.0f} |")
+            out.append(voice.text(
+                "digest.glance.row",
+                section=section.heading, count=len(section.entries), minutes=f"{mins:.0f}",
+            ))
         out.append("")
 
         # --- per-section body ---------------------------------------------
         for section in sections:
             profile = self.cfg.profile(section.profile_id)
             out += [f"## {section.heading}", ""]
+            # Per-profile intro wins over the voice pack's generic one, so a
+            # section can explain itself in its own words.
+            intro = profile.digest_intro or voice.text("digest.section.intro",
+                                                       section=section.heading)
+            if intro:
+                out += [intro, ""]
             if section.suppressed_note:
-                out += [f"> {section.suppressed_note}", ""]
+                out += [voice.text("digest.section.suppressed_note",
+                                   note=section.suppressed_note), ""]
 
             for entry in section.entries:
                 header = f"### {entry['name']}"
@@ -309,17 +339,15 @@ class DigestBuilder:
                 ]
                 if entry["consent"] and entry["consent"] != "not_required":
                     meta.append(f"consent: {entry['consent'].replace('_', ' ')}")
-                out += ["`" + "` · `".join(meta) + "`", ""]
+                separator = voice.get("digest.entry.meta_separator", "` · `")
+                out += ["`" + separator.join(meta) + "`", ""]
 
                 if entry["attention"]:
-                    out += [
-                        "> This recording was flagged for human attention and was not "
-                        "summarised. Read it yourself.",
-                        "",
-                    ]
+                    out += [voice.text("digest.entry.attention_note"), ""]
                     continue
                 if entry["error"]:
-                    out += [f"> Analysis error: {entry['error'][:300]}", ""]
+                    out += [voice.text("digest.entry.error_note",
+                                       error=entry["error"][:300]), ""]
                     continue
 
                 highlight = profile.highlight_fields or profile.field_keys
@@ -341,15 +369,14 @@ class DigestBuilder:
                     count = len(raw) if isinstance(raw, list) else (1 if raw else 0)
                     if count:
                         spec = profile.field_by_key(key)
-                        out += [
-                            f"**{spec.label if spec else key}**: {count} item(s), "
-                            "withheld from this view.",
-                            "",
-                        ]
+                        out += [voice.text(
+                            "digest.entry.withheld",
+                            label=spec.label if spec else key, count=count,
+                        ), ""]
 
                 na = entry["fields"].get("next_action")
                 if isinstance(na, str) and na.strip():
-                    out += [f"**Next:** {na.strip()}", ""]
+                    out += [voice.text("digest.entry.next_action", action=na.strip()), ""]
 
                 if opts.include_links and entry["artifacts"]:
                     links = ", ".join(
@@ -357,39 +384,42 @@ class DigestBuilder:
                     )
                     encrypted = [k for k, v in entry["artifacts"].items() if v.endswith(".enc")]
                     if links:
-                        out += [f"<sub>Files: {links}</sub>", ""]
+                        out += [voice.text("digest.entry.files", links=links), ""]
                     if encrypted:
-                        out += [
-                            f"<sub>Encrypted: {', '.join(encrypted)} "
-                            f"(open with: run.py open {entry['id']})</sub>",
-                            "",
-                        ]
+                        out += [voice.text(
+                            "digest.entry.encrypted",
+                            kinds=", ".join(encrypted), id=entry["id"],
+                        ), ""]
 
                 if shown == 0:
-                    out += ["_Nothing extracted for the highlighted fields._", ""]
+                    out += [voice.text("digest.entry.nothing_extracted"), ""]
 
         # --- footer -------------------------------------------------------
         if opts.include_costs:
             total = sum(e["cost"] for s in sections for e in s.entries)
             minutes = sum(e["minutes"] for s in sections for e in s.entries)
-            out += [
-                "---",
-                "",
-                f"<sub>{minutes:.0f} minutes processed · ${total:.4f} in API spend "
-                f"across this window.</sub>",
-                "",
-            ]
+            out += ["---", ""]
+            out += [voice.text("digest.footer.costs",
+                               minutes=f"{minutes:.0f}", cost=f"{total:.4f}"), ""]
 
         if opts.profile_id is None and not opts.include_personal:
             hidden = [
-                p.name for p in self.cfg.profiles.values() if p.exclude_from_combined_export
+                p for p in self.cfg.profiles.values() if p.exclude_from_combined_export
             ]
             if hidden:
-                out += [
-                    f"<sub>Personal profiles ({', '.join(hidden)}) are omitted from the "
-                    "combined view. Use `--profile father` or `--include-personal` "
-                    "to see them.</sub>",
-                    "",
-                ]
+                out += [voice.text(
+                    "digest.footer.personal_hidden",
+                    names=", ".join(p.name for p in hidden),
+                    example=hidden[0].id,
+                ), ""]
 
+        out += voice.lines("digest.footer.sign_off")
         return "\n".join(out)
+
+    def _empty_note(self, opts: DigestOptions, voice) -> str:
+        """What a section with nothing in it says. Per-profile wording wins."""
+        if opts.profile_id and opts.profile_id in self.cfg.profiles:
+            own = self.cfg.profile(opts.profile_id).digest_empty
+            if own:
+                return own
+        return voice.text("digest.empty")

@@ -11,10 +11,12 @@ Two guarantees are pinned here:
 """
 
 import json
+from pathlib import Path
 
 import pytest
 
 from _fixtures import CLIENT_CALL, StubLLM, build_sandbox, drop
+from plaud_bridge.db import Database
 from plaud_bridge.llm.anthropic_provider import AnthropicLLM
 from plaud_bridge.llm.openai_compat_provider import OpenAICompatLLM
 from plaud_bridge.pipeline import Pipeline
@@ -182,3 +184,85 @@ def test_audit_log_is_newest_first_and_respects_the_limit(sandbox):
         assert [r["detail"] for r in rows] == ["entry 4", "entry 3", "entry 2"]
     finally:
         pipe.close()
+
+
+# =========================================================================
+# The review cadence
+# =========================================================================
+def test_review_reports_standing_consent_as_due_and_then_satisfied(sandbox, capsys):
+    """
+    `reaffirm_every_days` was parsed and never read. father.yaml promises a
+    prompt "on first run each month"; this is where that promise is kept.
+    """
+
+    from plaud_bridge.cli import build_parser, cmd_review
+
+    cfg, _ = sandbox
+    args = build_parser().parse_args(["--config", str(cfg.root / "config"), "review"])
+
+    assert cmd_review(args) == 0
+    first = capsys.readouterr().out
+    assert "[DUE] Father" in first
+    assert "never reaffirmed" in first
+    assert "review --reaffirm father" in first
+
+    db = Database(cfg.path("database"))
+    try:
+        db.audit("consent_reaffirm", "father", actor="human")
+    finally:
+        db.close()
+
+    assert cmd_review(args) == 0
+    second = capsys.readouterr().out
+    assert "[ ok] Father" in second
+    assert "[DUE] Husband" in second, "reaffirming one profile satisfied another"
+
+
+def test_review_uses_the_most_recent_reaffirmation(sandbox, capsys):
+    from datetime import datetime, timedelta, timezone
+
+    from plaud_bridge.cli import build_parser, cmd_review
+
+    cfg, _ = sandbox
+    db = Database(cfg.path("database"))
+    try:
+        stale = (datetime.now(timezone.utc) - timedelta(days=400)).isoformat()
+        with db.tx() as cur:
+            cur.execute(
+                "INSERT INTO audit(at,recording_id,action,detail,actor) VALUES (?,?,?,?,?)",
+                (stale, None, "consent_reaffirm", "father", "human"),
+            )
+        db.audit("consent_reaffirm", "father", actor="human")
+    finally:
+        db.close()
+
+    args = build_parser().parse_args(["--config", str(cfg.root / "config"), "review"])
+    assert cmd_review(args) == 0
+    out = capsys.readouterr().out
+    assert "[ ok] Father" in out, "an old reaffirmation masked a current one"
+
+
+def test_review_surfaces_expired_artifacts_without_deleting_them(sandbox, capsys):
+    from datetime import datetime, timedelta, timezone
+
+    from plaud_bridge.cli import build_parser, cmd_review
+
+    cfg, _ = sandbox
+    drop(cfg, "client-marcus.txt", CLIENT_CALL)
+    pipe = Pipeline(cfg)
+    try:
+        pipe.run()
+        rec_id = pipe.db.query()[0]["id"]
+        past = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
+        with pipe.db.tx() as cur:
+            cur.execute("UPDATE artifacts SET expires_at=? WHERE recording_id=?", (past, rec_id))
+        paths = [Path(r["path"]) for r in pipe.db.expired_artifacts()]
+    finally:
+        pipe.close()
+
+    args = build_parser().parse_args(["--config", str(cfg.root / "config"), "review"])
+    assert cmd_review(args) == 0
+    out = capsys.readouterr().out
+    assert "past their expiry" in out
+    assert "retention --execute" in out
+    assert all(p.exists() for p in paths), "review deleted something; it only reports"

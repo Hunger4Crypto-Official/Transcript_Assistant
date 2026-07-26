@@ -212,3 +212,17 @@ logging:
   redact_content: true
   rotate_mb: 20
   backups: 5
+
+voice:
+  # Which voice pack in config/voice/ supplies the digest wording.
+  #   plain  - neutral and factual (default)
+  #   brief  - short and scannable, for reading on a phone
+  #   warm   - written like a person assembled it; suits the personal profiles
+  # `run.py voices` lists what is installed.
+  preset: "plain"
+  # Override individual strings without copying a whole pack. Same shape as the
+  # pack files, merged on top of the chosen preset.
+  overrides: {}
+    # digest:
+    #   needs_you:
+    #     heading: "Before You Do Anything Else"

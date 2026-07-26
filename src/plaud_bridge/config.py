@@ -16,6 +16,7 @@ from typing import Any
 import yaml
 
 from .models import Sensitivity
+from .voice import Voice
 
 # Profiles whose local-only guarantee is enforced by code, not by config.
 # Adding a profile here means no config change can send its content to a
@@ -87,6 +88,14 @@ class Profile:
     highlight_fields: list[str]
     suppress_fields: list[str]
     exclude_from_combined_export: bool
+
+    # Voice, per profile. `digest_intro` opens the section, `digest_empty` is
+    # what the section says when the window turned up nothing, and `persona` is
+    # prepended to the extraction prompt so one profile can read differently
+    # from another without forking the house style.
+    digest_intro: str = ""
+    digest_empty: str = ""
+    persona: str = ""
 
     consent_gate_key: str = ""
     consent_gate_value: bool = True
@@ -198,6 +207,9 @@ class Profile:
             highlight_fields=[str(f) for f in digest.get("highlight_fields", [])],
             suppress_fields=[str(f) for f in digest.get("suppress_fields", [])],
             exclude_from_combined_export=bool(digest.get("exclude_from_combined_export", False)),
+            digest_intro=str(digest.get("intro", "")).strip(),
+            digest_empty=str(digest.get("empty", "")).strip(),
+            persona=str(extraction.get("persona", "")).strip(),
             consent_gate_key=gate_key,
             consent_gate_value=gate_val,
             reaffirm_every_days=reaffirm,
@@ -230,11 +242,13 @@ class Glossary:
 class Config:
     """Loaded pipeline config plus the profile registry."""
 
-    def __init__(self, root: Path, data: dict[str, Any], profiles: dict[str, Profile], glossary: Glossary):
+    def __init__(self, root: Path, data: dict[str, Any], profiles: dict[str, Profile],
+                 glossary: Glossary, voice: Voice | None = None):
         self.root = root
         self._d = data
         self.profiles = profiles
         self.glossary = glossary
+        self.voice = voice or Voice()
 
     # ---- generic access -------------------------------------------------
     def get(self, dotted: str, default: Any = None) -> Any:
@@ -311,6 +325,11 @@ class Config:
 
         profiles: dict[str, Profile] = {}
         for pf in sorted(profiles_dir.glob("*.yaml")):
+            # Leading underscore means scaffolding, not a profile. `_TEMPLATE.yaml`
+            # is meant to be copied, and loading it would put a profile called
+            # TEMPLATE into the routing table.
+            if pf.stem.startswith("_"):
+                continue
             prof = Profile.load(pf)
             profiles[prof.id] = prof
         if not profiles:
@@ -323,7 +342,18 @@ class Config:
             )
 
         glossary = Glossary.load(cfg_dir / "glossary.yaml")
-        cfg = cls(Path(root).resolve() if root else cfg_dir.parent, data, profiles, glossary)
+
+        voice_cfg = data.get("voice") or {}
+        voice = Voice.load(
+            cfg_dir / "voice",
+            preset=str(voice_cfg.get("preset", "plain")),
+            overrides=voice_cfg.get("overrides") or {},
+        )
+
+        cfg = cls(
+            Path(root).resolve() if root else cfg_dir.parent,
+            data, profiles, glossary, voice,
+        )
         cfg._validate()
         return cfg
 

@@ -1,0 +1,69 @@
+# =============================================================================
+# Voice :: Warm
+# =============================================================================
+# Written as if a person who knows you assembled it. Best paired with
+# --profile father or --profile husband, where the content is memory rather
+# than work product and a clinical register reads badly against it.
+#
+# One caution worth stating. This voice changes wording, not substance. It does
+# not soften a compliance flag, hide a suppressed field, or make a quarantine
+# sound optional -- those strings stay direct on purpose, because the moment a
+# warning sounds pleasant is the moment it stops working.
+# =============================================================================
+
+id: warm
+name: "Warm"
+description: "Written like a person assembled it. Suits the personal profiles."
+
+digest:
+  title: "Your Week"
+  profile_title: "{profile_name}"
+  window: "The {days} days from {start} to {end}.  "
+  generated: "_Put together {generated} UTC._"
+  empty: "Nothing came through this week. That is allowed."
+  opening: ""
+
+  needs_you:
+    heading: "Before Anything Else"
+    intro: "These are the things that will bother you if they slide."
+    why_flagged: "worth reading yourself rather than in summary"
+    why_error: "did not come through: {error}"
+    attention_line: "- **{section}** — `{name}`, {why}"
+    action_line: "- **{section}** — {action}  \n  <sub>from {name}</sub>"
+    empty: ""
+
+  glance:
+    heading: "The Shape Of It"
+    columns: "| | Recordings | Minutes |"
+    row: "| {section} | {count} | {minutes} |"
+
+  section:
+    intro: ""
+    suppressed_note: "> {note}"
+
+  entry:
+    # Deliberately unchanged in tone. A flag is a flag.
+    attention_note: >-
+      > This one was flagged for you to read rather than summarised. That is the
+      right outcome, not a failure.
+    error_note: "> Analysis error: {error}"
+    nothing_extracted: "_Nothing stood out in the highlighted fields._"
+    next_action: "**The one thing:** {action}"
+    withheld: "**{label}**: {count} item(s), kept out of this view on purpose."
+    files: "<sub>Files: {links}</sub>"
+    encrypted: "<sub>Encrypted — open it with `run.py open {id}`</sub>"
+
+  footer:
+    costs: "<sub>{minutes} minutes of your life, processed for ${cost}.</sub>"
+    personal_hidden: >-
+      <sub>The personal profiles ({names}) are not in this combined view, in
+      case you hand it to someone. `--profile {example}` or
+      `--include-personal` when you want them.</sub>
+    sign_off: ""
+
+analysis:
+  house_style: >-
+    Write the way someone would who was in the room and cared about it. Use the
+    speaker's own words wherever you can. Do not evaluate anyone, do not
+    congratulate, and do not reach for significance that was not there. Leave a
+    field empty rather than filling it.

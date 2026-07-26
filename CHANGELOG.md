@@ -1,6 +1,70 @@
 # Changelog
 
-## Unreleased
+## Unreleased — voice, templates, and the review cadence
+
+### Voice
+
+The digest's wording was hardcoded prose scattered through the renderer.
+Changing "Needs You" to something that sounded like you was a source edit.
+
+- Every user-facing string now comes from a voice pack in `config/voice/`.
+  Three ship: `plain` (neutral, the default), `brief` (short and scannable, for
+  a phone between appointments), and `warm` (written like a person assembled
+  it, for the personal profiles).
+- `voice.overrides` in `pipeline.yaml` changes individual strings without
+  copying a whole pack.
+- Profiles carry their own voice: `digest.intro` opens a section,
+  `digest.empty` is what it says when the window turned up nothing, and
+  `extraction.persona` sets the register for that profile's analysis.
+- `analysis.house_style` sets one register across all five profiles so they do
+  not drift apart. Prompt layering is house style, then persona, then the
+  profile's `system_prompt` — constraints last, nearest the task, where nothing
+  configured above can dilute them.
+- Structure stays in code. A pack supplies words and cannot reorder or re-emit
+  sections, because the renderer is where suppressed fields, personal-profile
+  exclusion, and on-demand decryption are enforced. There is a test that an
+  override cannot talk the digest into printing a suppressed field.
+- Nothing can fail to render: a partial pack is valid, a missing or corrupt one
+  falls back with a warning, and an unknown placeholder renders empty.
+
+### Templates
+
+- `config/profiles/_TEMPLATE.yaml`, documenting every key inline, including the
+  ones that are easy to get wrong: what sensitivity actually drives, why cloud
+  ASR is opt-in per file, and what `requires_human_attention` does.
+- `run.py new-profile <id> --name ... --heading ...` scaffolds from it.
+- Files starting with an underscore are skipped by the loader, so the template
+  never becomes a profile called TEMPLATE.
+
+### The review cadence
+
+COMPLIANCE.md section 9 asks you to read certain things weekly, monthly,
+quarterly, and annually. Nothing implemented it.
+
+- `run.py review` assembles all four tiers and reports what is actually due.
+- `reaffirm_every_days` now does something. `father.yaml` promised a prompt "on
+  first run each month" and the value was parsed and never read; lapsed standing
+  consent is now surfaced, and `run.py review --reaffirm <profile>` records the
+  reaffirmation to the audit log as a human action.
+- Unfiled recordings are harvested for the keywords that would have routed them.
+- Expired artifacts are reported. `review` never deletes anything.
+
+### HTML digests
+
+- `run.py digest --format html` writes a self-contained page: no scripts, no
+  fonts, no external stylesheet, so opening a digest containing a client's
+  health disclosures makes no network request. Light and dark, and it prints.
+- Rendered from the same markdown, so the two formats cannot drift into saying
+  different things.
+
+### Fixed
+
+- The reaffirmation lookup kept the oldest entry per profile rather than the
+  newest, which would have reported a profile as overdue forever.
+
+---
+
+## Unreleased — unpacking and enforcement
 
 The repository previously held the project as a `.tar.gz` with a few files
 unpacked beside it. This release makes it a working repository, then fixes what
