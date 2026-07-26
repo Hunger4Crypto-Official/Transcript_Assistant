@@ -1,0 +1,137 @@
+id: insurance_agent
+name: "Insurance Agent"
+short_name: "Agent"
+icon: "briefcase"
+description: >
+  Client-facing production work. Fact-finds, presentations, delivery meetings,
+  underwriting follow-ups, service calls. This is the profile with the heaviest
+  regulatory surface and the strictest handling.
+
+sensitivity: "high"
+
+processing:
+  # Client conversations routinely surface health and financial disclosures.
+  # Sending that to a third-party API without a BAA is the single easiest way
+  # to turn a productivity tool into a liability. Local only.
+  allow_cloud_asr: false
+  allow_cloud_llm: false
+  require_consent: true
+  encrypt_at_rest: true
+  redact_before_llm: true
+
+retention:
+  # Insurance books-and-records expectations run long. Confirm the exact
+  # requirement with your current upline / E&O carrier and adjust.
+  transcript_days: 2555      # ~7 years
+  raw_audio_days: 365
+  audit_log_days: 2555
+
+routing:
+  min_confidence: 0.55
+  keywords:
+    - "policy"
+    - "premium"
+    - "coverage"
+    - "beneficiary"
+    - "underwriting"
+    - "carrier"
+    - "term life"
+    - "whole life"
+    - "IUL"
+    - "indexed universal"
+    - "disability"
+    - "elimination period"
+    - "own occupation"
+    - "rider"
+    - "annuity"
+    - "1035"
+    - "illustration"
+    - "face amount"
+    - "death benefit"
+    - "cash value"
+    - "APS"
+    - "paramed"
+    - "issued"
+    - "declined"
+    - "rated"
+    - "table shave"
+    - "quote"
+    - "application"
+    - "in force"
+    - "lapse"
+    - "conversion"
+  negative_keywords:
+    - "role play"
+    - "roleplay"
+    - "practice run"
+  llm_hint: >
+    Route here when the speaker is acting as a licensed producer with a real
+    prospect, client, carrier, or underwriter. Real production work only.
+    A practice conversation, a debrief about a call, or teaching someone how to
+    sell belongs in Sales Trainer, not here.
+
+extraction:
+  system_prompt: >
+    You are an analyst supporting a licensed life and disability insurance
+    producer. Read the transcript and extract only what is actually present.
+    Never infer a fact that was not stated. Never generate advice, opinions,
+    recommendations, or projections of your own. If a field has no supporting
+    content, return an empty list for it. Quote the speaker verbatim where the
+    schema asks for a quote, and include the timestamp.
+  fields:
+    - key: "meeting_type"
+      label: "Meeting Type"
+      type: "string"
+      description: "One of: fact_find, presentation, delivery, service, underwriting_followup, prospecting, other"
+    - key: "participants"
+      label: "Participants"
+      type: "list[string]"
+      description: "Speaker labels and any names actually spoken aloud."
+    - key: "stated_needs"
+      label: "Stated Needs"
+      type: "list[quote]"
+      description: "Needs, goals, or concerns the client stated in their own words."
+    - key: "financial_disclosures"
+      label: "Financial Disclosures"
+      type: "list[quote]"
+      description: "Income, debt, assets, existing coverage the client disclosed."
+    - key: "health_disclosures"
+      label: "Health Disclosures"
+      type: "list[quote]"
+      description: "Any health information disclosed. Flagged as sensitive."
+      sensitive: true
+    - key: "objections"
+      label: "Objections Raised"
+      type: "list[object]"
+      description: "Each objection with a type label (price, trust, timing, spouse, need, competitor, other) and the verbatim quote."
+    - key: "commitments_by_client"
+      label: "Client Commitments"
+      type: "list[quote]"
+      description: "Anything the client agreed to do, with any date mentioned."
+    - key: "commitments_by_producer"
+      label: "My Commitments"
+      type: "list[quote]"
+      description: "Anything the producer agreed to do, with any date mentioned."
+    - key: "statements_needing_review"
+      label: "Statements Needing Compliance Review"
+      type: "list[quote]"
+      description: >
+        Any statement by the producer that could be read as a guarantee, a
+        projection of returns, a tax or legal opinion, a comparison claim about
+        a carrier, or a securities recommendation. Err heavily toward flagging.
+      priority: "high"
+    - key: "open_questions"
+      label: "Unresolved Questions"
+      type: "list[string]"
+      description: "Questions raised that were not answered during the meeting."
+    - key: "next_action"
+      label: "Next Action"
+      type: "string"
+      description: "The single clearest next step stated or implied by the close of the conversation."
+
+digest:
+  heading: "Production"
+  priority: 1
+  highlight_fields: ["next_action", "statements_needing_review", "objections"]
+  # Never render these into the plaintext digest. They stay in the vault.
+  suppress_fields: ["health_disclosures", "financial_disclosures"]

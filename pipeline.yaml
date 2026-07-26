@@ -1,0 +1,200 @@
+# =============================================================================
+# Plaud Bridge :: Pipeline Configuration
+# =============================================================================
+# Every tunable lives here. Code reads config; code does not hardcode policy.
+# Changing behaviour should mean editing this file, not editing src/.
+# =============================================================================
+
+version: 1
+
+paths:
+  # Drop exported Plaud audio (.mp3/.wav) or transcripts (.txt/.srt) here.
+  inbox: "./data/inbox"
+  # Working scratch. Safe to delete. Rebuilt on demand.
+  work: "./data/work"
+  # Processed artifacts (markdown + json), organised by date.
+  outbox: "./data/outbox"
+  # Encrypted vault for high-sensitivity profiles.
+  vault: "./data/vault"
+  # Quarantine for files that failed the compliance gate.
+  quarantine: "./data/quarantine"
+  # SQLite index.
+  database: "./data/bridge.db"
+  # Rotating logs.
+  logs: "./data/logs"
+
+ingest:
+  # Accepted extensions. Audio goes through ASR; text skips straight to analysis.
+  audio_extensions: [".mp3", ".wav", ".m4a", ".flac", ".ogg"]
+  text_extensions: [".txt", ".srt", ".md"]
+  # Content-hash dedupe. A file already in the DB is skipped, never reprocessed.
+  dedupe: true
+  # Move originals out of inbox after successful processing.
+  archive_originals: true
+  # Refuse files larger than this (guards against accidental 10-hour dumps).
+  max_file_mb: 512
+
+audio:
+  # ffmpeg must be on PATH.
+  ffmpeg_binary: "ffmpeg"
+  ffprobe_binary: "ffprobe"
+  # ASR models want 16kHz mono. Normalising here removes a whole class of bugs.
+  target_sample_rate: 16000
+  target_channels: 1
+  # Loudness normalisation. Plaud pin recordings run quiet; card recordings do not.
+  normalize_loudness: true
+  loudness_target_lufs: -16.0
+  # Cloud ASR endpoints cap uploads at ~25MB. Chunk below that with overlap
+  # so a word cut in half at a boundary is recovered by the stitcher.
+  chunk_seconds: 600
+  chunk_overlap_seconds: 8
+  max_chunk_mb: 20
+
+asr:
+  # Provider order is a fallback chain, not a preference list.
+  # The compliance gate can VETO a cloud provider for a given recording;
+  # if it does, the chain skips to the first local provider.
+  providers: ["groq", "local"]
+
+  groq:
+    enabled: true
+    api_key_env: "GROQ_API_KEY"
+    base_url: "https://api.groq.com/openai/v1"
+    model: "whisper-large-v3-turbo"
+    # Verify at groq.com/pricing before trusting cost estimates.
+    usd_per_audio_hour: 0.04
+    temperature: 0.0
+    timeout_seconds: 300
+    max_retries: 4
+    is_cloud: true
+
+  local:
+    enabled: true
+    # pip install faster-whisper
+    model: "large-v3"
+    device: "auto"          # auto | cpu | cuda
+    compute_type: "auto"    # auto | int8 | float16
+    beam_size: 5
+    usd_per_audio_hour: 0.0
+    is_cloud: false
+
+diarization:
+  enabled: true
+  # "pyannote" runs locally (needs HF token + accepted model licence).
+  # "none" produces a single unlabelled speaker track.
+  provider: "pyannote"
+  pyannote:
+    model: "pyannote/speaker-diarization-3.1"
+    hf_token_env: "HUGGINGFACE_TOKEN"
+    device: "auto"
+  min_speakers: 1
+  max_speakers: 6
+  # Map the dominant speaker to you. Plaud sits on your body, so the loudest
+  # and most-present voice is almost always the wearer.
+  assume_owner_is_dominant_speaker: true
+  owner_label: "Sasson"
+
+llm:
+  providers: ["anthropic", "groq"]
+
+  anthropic:
+    enabled: true
+    api_key_env: "ANTHROPIC_API_KEY"
+    base_url: "https://api.anthropic.com/v1"
+    model: "claude-sonnet-4-6"
+    version_header: "2023-06-01"
+    max_tokens: 8000
+    temperature: 0.0
+    timeout_seconds: 180
+    max_retries: 4
+    is_cloud: true
+
+  groq:
+    enabled: true
+    api_key_env: "GROQ_API_KEY"
+    base_url: "https://api.groq.com/openai/v1"
+    model: "llama-3.3-70b-versatile"
+    max_tokens: 8000
+    temperature: 0.0
+    timeout_seconds: 180
+    max_retries: 4
+    is_cloud: true
+
+  local:
+    enabled: false
+    base_url: "http://localhost:11434/v1"   # ollama-compatible
+    model: "llama3.3:70b"
+    max_tokens: 8000
+    temperature: 0.0
+    timeout_seconds: 600
+    max_retries: 2
+    is_cloud: false
+
+routing:
+  # Stage 1: cheap keyword prescore narrows the candidate set.
+  # Stage 2: one LLM call scores every candidate at once.
+  # A recording can match several profiles. Family dinner where a client calls
+  # is legitimately Husband + Father + Insurance Agent.
+  multi_label: true
+  keyword_prescore_weight: 0.35
+  llm_confirm: true
+  # Profiles scoring below their own min_confidence are dropped.
+  # If nothing survives, the recording lands in "unfiled" and is still searchable.
+  fallback_profile: "unfiled"
+  max_profiles_per_recording: 4
+
+compliance:
+  # Master switch. Turning this off is a deliberate, logged act.
+  enabled: true
+  # Scan the opening window of the transcript for a consent statement.
+  consent_window_seconds: 90
+  # What happens when a consent-required profile has no detectable consent.
+  # "quarantine" = stop, do not analyse, flag for human review. Recommended.
+  # "flag"       = analyse but stamp the output with a warning.
+  on_missing_consent: "quarantine"
+  # Two-party / all-party consent states in your licence footprint.
+  # Verify current statutes with counsel. This list is an operational default,
+  # not legal advice.
+  all_party_consent_states: ["NV", "FL", "CA", "WA", "PA", "MA", "IL", "MD", "MT", "NH", "CT", "MI", "OR", "DE"]
+  # Redact these before any transcript leaves the machine for a cloud LLM.
+  redact_patterns:
+    ssn: '\b\d{3}-\d{2}-\d{4}\b'
+    credit_card: '\b(?:\d[ -]*?){13,19}\b'
+    policy_number: '\b[A-Z]{2,4}[- ]?\d{6,12}\b'
+    dob: '\b(?:0?[1-9]|1[0-2])[/-](?:0?[1-9]|[12]\d|3[01])[/-](?:19|20)\d{2}\b'
+    email: '\b[\w.+-]+@[\w-]+\.[\w.]{2,}\b'
+    phone: '(?:\+?1[ -.]?)?\(?\b\d{3}\b\)?[ -.]?\d{3}[ -.]?\d{4}\b'
+  # Escalation rule. When a recording routes to several profiles, the strictest
+  # profile's processing policy governs the ENTIRE recording. One private
+  # sentence in a business meeting locks the whole file down.
+  strictest_profile_governs: true
+
+retention:
+  # Nightly sweep. Nothing is deleted without a dry run you can inspect first.
+  enabled: true
+  dry_run_default: true
+  # Keep raw audio only as long as you actually need it. Transcripts are cheap
+  # to keep; audio is the liability.
+  raw_audio_days: 90
+  # Per-profile overrides live in the profile files and win over this default.
+  default_transcript_days: 365
+
+digest:
+  default_window_days: 7
+  # Sections render in this order. Omitting a profile hides it from "all".
+  section_order: ["insurance_agent", "sales_trainer", "father", "husband", "unfiled"]
+  include_transcript_links: true
+  include_cost_summary: true
+  max_items_per_section: 40
+
+cost:
+  # Soft guardrail. The pipeline warns and pauses past this per-run spend.
+  warn_usd_per_run: 2.00
+  halt_usd_per_run: 10.00
+
+logging:
+  level: "INFO"
+  # Never write transcript content into logs. Hashes and IDs only.
+  redact_content: true
+  rotate_mb: 20
+  backups: 5
