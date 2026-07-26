@@ -1,0 +1,23 @@
+# --- required ---------------------------------------------------------------
+PyYAML>=6.0
+cryptography>=42.0        # encrypted vault. Without it, sensitive profiles refuse to write.
+
+# --- required for the father and husband profiles ---------------------------
+# These profiles are local-only by code enforcement. Without a local ASR and a
+# local LLM they will fail rather than fall back to a cloud provider. That is
+# the intended behaviour, not a bug.
+faster-whisper>=1.0.0
+
+# --- optional: speaker labels -----------------------------------------------
+# Needs a HuggingFace token and acceptance of the model licence on the model
+# page. Without it the pipeline still runs, with a single unlabelled speaker.
+# pyannote.audio>=3.1
+# torch>=2.0
+
+# --- development ------------------------------------------------------------
+# pytest>=8.0
+
+# --- system dependency ------------------------------------------------------
+# ffmpeg must be on PATH.
+#   macOS:  brew install ffmpeg
+#   Ubuntu: sudo apt install ffmpeg

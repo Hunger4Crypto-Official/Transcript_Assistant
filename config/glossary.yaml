@@ -1,0 +1,72 @@
+# =============================================================================
+# Domain glossary. Two jobs:
+#   1. Fed to the ASR decoder as an initial prompt to bias recognition.
+#   2. Used for deterministic post-ASR correction of known mis-hearings.
+# Add to this every time you catch a mangled term. It compounds.
+# =============================================================================
+
+# Terms injected into the ASR prompt. Keep under ~220 tokens; Whisper truncates.
+asr_bias_terms:
+  - "indexed universal life"
+  - "IUL"
+  - "term conversion"
+  - "elimination period"
+  - "own-occupation"
+  - "residual disability"
+  - "1035 exchange"
+  - "modified endowment contract"
+  - "MEC"
+  - "face amount"
+  - "death benefit"
+  - "cash value"
+  - "paid-up additions"
+  - "waiver of premium"
+  - "attending physician statement"
+  - "paramed exam"
+  - "table rating"
+  - "preferred best"
+  - "guaranteed issue"
+  - "simplified issue"
+  - "annuity"
+  - "surrender charge"
+  - "annual reset"
+  - "participation rate"
+  - "underwriting"
+  - "beneficiary"
+  - "contestability"
+  - "in force illustration"
+
+# Deterministic corrections. Applied case-insensitively with word boundaries.
+# Left side is what the model produces; right side is what it should be.
+corrections:
+  "elimination. period": "elimination period"
+  "I U L": "IUL"
+  "i-u-l": "IUL"
+  "I, you, well": "IUL"
+  "eye you all": "IUL"
+  "make contract": "MEC contract"
+  "M E C": "MEC"
+  "ten thirty five exchange": "1035 exchange"
+  "10 35 exchange": "1035 exchange"
+  "own occupation": "own-occupation"
+  "own-oc": "own-occupation"
+  "para med": "paramed"
+  "A P S": "APS"
+  "attending physicians statement": "attending physician statement"
+  "table shave": "table shave"
+  "phase amount": "face amount"
+  "cash value life": "cash value life"
+  "term life short": "term life"
+  "whole life short": "whole life"
+  "surrender charged": "surrender charge"
+  "participation right": "participation rate"
+  "contestability period": "contestability period"
+  "waiver of premiums": "waiver of premium"
+  "guarantee issue": "guaranteed issue"
+
+# Names the ASR should not butcher. Populate with your carriers and common
+# client first names. Kept separate so you can gitignore it if you prefer.
+proper_nouns:
+  - "Sasson"
+  - "Nevada"
+  - "Las Vegas"

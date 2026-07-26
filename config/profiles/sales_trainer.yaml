@@ -1,0 +1,102 @@
+id: sales_trainer
+name: "Sales Trainer"
+short_name: "Trainer"
+icon: "presentation"
+description: >
+  Teaching, coaching, role play, self-debrief, and content raw material.
+  This is where a conversation becomes a lesson rather than a transaction.
+
+sensitivity: "medium"
+
+processing:
+  # No client PII by definition, so cloud is acceptable after redaction.
+  # If a real client name slips through, redaction catches it.
+  allow_cloud_asr: true
+  allow_cloud_llm: true
+  require_consent: false
+  encrypt_at_rest: false
+  redact_before_llm: true
+
+retention:
+  transcript_days: 1825      # 5 years, this is your content archive
+  raw_audio_days: 180
+  audit_log_days: 730
+
+routing:
+  min_confidence: 0.50
+  keywords:
+    - "role play"
+    - "roleplay"
+    - "objection handling"
+    - "script"
+    - "framework"
+    - "close"
+    - "closing"
+    - "rapport"
+    - "discovery"
+    - "pipeline"
+    - "activity"
+    - "dials"
+    - "appointment set"
+    - "coaching"
+    - "debrief"
+    - "what I should have said"
+    - "next time"
+    - "training"
+    - "onboarding"
+    - "mindset"
+    - "prospecting system"
+    - "referral"
+  negative_keywords: []
+  llm_hint: >
+    Route here for teaching, being taught, practising, or reflecting on the
+    craft of selling. Self-debriefs after a real call belong here as well as in
+    Insurance Agent. Voice memos capturing a content idea about sales or
+    business belong here.
+
+extraction:
+  system_prompt: >
+    You are a sales development analyst. Extract teachable material from the
+    transcript. Focus on what is transferable and repeatable. Do not invent
+    frameworks that were not discussed. Where the speaker articulates a
+    principle, capture it in their own words rather than paraphrasing it into
+    generic sales language.
+  fields:
+    - key: "session_type"
+      label: "Session Type"
+      type: "string"
+      description: "One of: role_play, coaching_given, coaching_received, self_debrief, content_idea, training_delivery, other"
+    - key: "principles"
+      label: "Principles Articulated"
+      type: "list[quote]"
+      description: "Reusable rules, frameworks, or philosophies stated aloud."
+    - key: "objection_patterns"
+      label: "Objection Patterns"
+      type: "list[object]"
+      description: "Objection type, the handling approach used, and whether it appeared to land."
+    - key: "language_that_worked"
+      label: "Language That Worked"
+      type: "list[quote]"
+      description: "Specific phrasing worth reusing verbatim."
+    - key: "language_to_fix"
+      label: "Language To Fix"
+      type: "list[object]"
+      description: "Phrasing that was weak, hedged, or off-target, with what was wrong about it."
+    - key: "content_hooks"
+      label: "Content Hooks"
+      type: "list[string]"
+      description: "Ideas from this conversation that could become an article, post, or video."
+    - key: "skill_gaps"
+      label: "Skill Gaps Observed"
+      type: "list[string]"
+      description: "Specific, coachable gaps. Behaviour, not character."
+    - key: "next_action"
+      label: "Next Action"
+      type: "string"
+      description: "The clearest practice or follow-up step."
+
+digest:
+  heading: "Craft"
+  priority: 2
+  highlight_fields: ["content_hooks", "language_that_worked", "next_action"]
+  suppress_fields: []

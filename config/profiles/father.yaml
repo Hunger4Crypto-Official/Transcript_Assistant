@@ -1,0 +1,127 @@
+id: father
+name: "Father"
+short_name: "Dad"
+icon: "home"
+description: >
+  Time with your kids. The point of this profile is memory and follow-through:
+  the things they said that you want to keep, and the things you promised that
+  you do not want to drop.
+
+sensitivity: "maximum"
+
+processing:
+  # Hard lock. Minors are almost certainly on these recordings. Their voices
+  # and words do not go to a third-party API, ever, under any config.
+  # The code enforces this independently of these flags (see hard_lock below).
+  allow_cloud_asr: false
+  allow_cloud_llm: false
+  require_consent: false          # legal consent; see family_consent below
+  encrypt_at_rest: true
+  redact_before_llm: true
+
+# Enforced in code, not just config. Flipping the flags above to true will not
+# unlock cloud processing for this profile. You would have to edit source and
+# leave a commit behind, which is the point.
+hard_lock:
+  local_processing_only: true
+  reason: "Recordings likely contain minors. No third-party processing."
+
+family_consent:
+  # Not a statute. A house rule. The device is visible and the family knows it
+  # records. If that stops being true, stop using this profile.
+  everyone_knows_device_records: true
+  # Prompted on first run each month as a deliberate friction point.
+  reaffirm_every_days: 30
+
+retention:
+  # The transcripts are the keepsake. The audio is the liability.
+  transcript_days: 3650      # 10 years
+  raw_audio_days: 30
+  audit_log_days: 365
+
+routing:
+  min_confidence: 0.60
+  keywords:
+    - "dad"
+    - "daddy"
+    - "homework"
+    - "school"
+    - "teacher"
+    - "practice"
+    - "bedtime"
+    - "playground"
+    - "cartoon"
+    - "video game"
+    - "grounded"
+    - "allowance"
+    - "chores"
+    - "sleepover"
+    - "birthday party"
+    - "field trip"
+    - "permission slip"
+    - "recital"
+    - "game on saturday"
+  negative_keywords: []
+  llm_hint: >
+    Route here when the speaker is talking with or about his children in a
+    parenting context. Family logistics, school, activities, discipline,
+    encouragement, or just conversation with a kid. Do NOT route business
+    conversations here simply because a child is audible in the background.
+
+extraction:
+  system_prompt: >
+    You are helping a father keep track of his family life. Extract only what
+    was actually said.
+
+    HARD CONSTRAINTS. You must follow all of these:
+    - Do NOT assess, diagnose, score, rate, or psychologically profile any
+      child. You are not a clinician and this is not an evaluation.
+    - Do NOT assign blame, judge parenting quality, or offer parenting advice.
+    - Do NOT speculate about anyone's emotional state beyond what they said
+      plainly about themselves.
+    - Do NOT summarise a child's behaviour in evaluative language.
+    - If the transcript contains anything suggesting a child is being harmed or
+      is in danger, do not analyse it. Return only the field
+      "requires_human_attention" set to true and stop.
+
+    Your job is memory and follow-through. Nothing else.
+  fields:
+    - key: "requires_human_attention"
+      label: "Requires Human Attention"
+      type: "boolean"
+      description: "True only if the content should be read by a person rather than summarised."
+      priority: "critical"
+    - key: "worth_remembering"
+      label: "Worth Remembering"
+      type: "list[quote]"
+      description: "Things your kids said that you would regret forgetting. Verbatim, with timestamp."
+    - key: "promises_i_made"
+      label: "Promises I Made"
+      type: "list[object]"
+      description: "Anything you told a child you would do, with any date or condition attached."
+      priority: "high"
+    - key: "logistics"
+      label: "Logistics"
+      type: "list[object]"
+      description: "Dates, times, places, permissions, and things that need a signature or a payment."
+    - key: "asks_from_them"
+      label: "What They Asked For"
+      type: "list[quote]"
+      description: "Requests a child made, whether or not you answered."
+    - key: "milestones"
+      label: "Milestones"
+      type: "list[string]"
+      description: "First times, achievements, or notable events mentioned."
+    - key: "next_action"
+      label: "Next Action"
+      type: "string"
+      description: "The one thing you should not let slide."
+
+digest:
+  heading: "Family"
+  priority: 3
+  highlight_fields: ["promises_i_made", "logistics", "next_action"]
+  suppress_fields: []
+  # Family content stays out of any digest that could be shared or exported
+  # alongside work material unless explicitly requested by profile.
+  exclude_from_combined_export: true

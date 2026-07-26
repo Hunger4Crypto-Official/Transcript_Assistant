@@ -77,10 +77,16 @@ Other commands:
 | `run.py search "elimination period"` | Find recordings |
 | `run.py open <id>` | Decrypt and print a transcript |
 | `run.py open <id> --kind analysis` | Decrypt and print the structured analysis |
+| `run.py audit` | Read the compliance audit log |
+| `run.py audit --recording-id <id>` | Everything that happened to one recording |
+| `run.py audit --actor human --out audit.csv` | Export the human decisions |
 | `run.py release <id>` | Release a quarantined recording after review |
 | `run.py retention` | Dry-run the expiry sweep |
 | `run.py retention --execute` | Actually delete expired artifacts |
 | `run.py profiles` | Show the routing table |
+
+`pip install -e .` installs the same commands as `plaud-bridge`, if you would
+rather not type `python run.py` from the project directory.
 
 You can also drop a Plaud-exported **transcript** (`.txt` or `.srt`) into the
 inbox instead of audio. ASR is skipped entirely and everything downstream runs
@@ -104,6 +110,28 @@ Setting `allow_cloud_llm: true` in their YAML raises a configuration error at
 startup with an explanation. Opening them up requires editing
 `CODE_ENFORCED_LOCAL_ONLY` in `src/plaud_bridge/config.py`, which leaves a
 commit behind. That friction is the feature.
+
+### How the cloud actually gets used
+
+Only Sales Trainer permits a cloud provider, so in the shipped configuration
+almost nothing goes out:
+
+- **Transcription is local unless you ask for cloud.** ASR runs before there is
+  any text to classify, and a filename like `REC0042.wav` says nothing about
+  what is on the recording. So cloud ASR is opt-in per file: name the file after
+  a profile that allows it (`sales_trainer-roleplay.mp3`) and it goes to Groq.
+  Everything else is transcribed locally. This is the expensive default on
+  purpose — a slow local transcription is recoverable, an upload is not.
+- **Routing is local.** The routing call sees the whole transcript before
+  anything is known about it, so it stays local unless every profile permits
+  cloud. Change that by permitting cloud on your profiles, not by editing code.
+- **Analysis follows the governing profile**, not the profile being analysed. A
+  recording that is Husband and Sales Trainer at once is analysed locally for
+  both, because Husband governs the whole file.
+
+The practical consequence: without a local LLM configured, the family profiles
+fail rather than falling back. `run.py doctor` tells you this before you find
+out the hard way.
 
 ### Editing a profile
 
@@ -139,13 +167,19 @@ Add it, rerun, done. No code change.
 ## Costs
 
 Transcription on Groq Whisper Turbo runs about `$0.04` per audio hour, so 20
-hours a month is under a dollar. Analysis cost depends on which model you point
-at it. `run.py status` shows cumulative spend, and `cost.warn_usd_per_run` /
-`cost.halt_usd_per_run` in `pipeline.yaml` stop a runaway loop.
+hours a month is under a dollar — but see above: cloud ASR is opt-in per file,
+so most recordings cost nothing to transcribe and take longer instead.
 
-Verify current pricing at groq.com/pricing rather than trusting the numbers
-baked into the config. They were accurate when this was written; that is all
-anyone can say about API pricing.
+Analysis is priced from the token usage each provider reports, at the
+`usd_per_million_*_tokens` rates in `pipeline.yaml`. That covers routing (one
+call per recording) and extraction (one per matched profile).
+`run.py status` shows cumulative spend, and `cost.warn_usd_per_run` /
+`cost.halt_usd_per_run` stop a runaway loop.
+
+**Verify current pricing yourself** rather than trusting the numbers baked into
+the config. They were plausible when written; that is all anyone can say about
+API pricing. A provider left unpriced counts as `$0.00` and says so in the log,
+which means the halt threshold cannot see it.
 
 ---
 
@@ -164,7 +198,16 @@ anyone can say about API pricing.
 python -m pytest tests/ -q
 ```
 
-31 tests. The ones that matter most are in `test_config.py` (the local-only
-locks) and `test_end_to_end.py` (a family recording never reaching a cloud
-provider, missing consent producing a quarantine, personal content staying out
-of the combined digest). If you change routing or compliance, run these first.
+81 tests, no network and no API keys required.
+
+The ones that matter most are in **`test_privacy_guarantees.py`**. Every test
+there corresponds to a sentence this README states as a promise: a family
+recording never reaching a cloud provider, the strictest profile governing the
+whole file, the index holding no plaintext copy of an encrypted transcript, a
+refusal never counting as consent. A failure in that file is a privacy
+regression, not a bug.
+
+After that: `test_config.py` for the local-only locks, `test_end_to_end.py` for
+the spine, `test_cost_and_audit.py` for the spend ceiling and the audit trail,
+and `test_ingest_and_logging.py` for the quiet failures — the ones where nothing
+raises and the transcript is simply missing words.
