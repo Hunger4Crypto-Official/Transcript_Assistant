@@ -21,6 +21,7 @@ from pathlib import Path
 
 from ..logging_setup import get
 from ..models import Segment
+from ..runtime import is_offline, resolve_local_model
 
 log = get("diarize")
 
@@ -40,6 +41,18 @@ def _available(cfg) -> tuple[bool, str]:
         import pyannote.audio  # noqa: F401
     except ImportError:
         return False, "pyannote.audio is not installed (pip install pyannote.audio)"
+    # A token is only needed to DOWNLOAD the model. Once the weights are on
+    # disk, requiring one would make offline diarization impossible for no
+    # reason.
+    model = cfg.get("diarization.pyannote.model", "pyannote/speaker-diarization-3.1")
+    _target, local = resolve_local_model(cfg, model, "diarization")
+    if local:
+        return True, "ready (local weights)"
+    if is_offline(cfg):
+        return False, (
+            f"runtime.offline is on and '{model}' is not in runtime.models_dir. "
+            "Fetch it with scripts/fetch_models.py on a networked machine."
+        )
     token_env = cfg.get("diarization.pyannote.hf_token_env", "HUGGINGFACE_TOKEN")
     if not os.environ.get(token_env, "").strip():
         return False, f"{token_env} is not set"
@@ -54,8 +67,14 @@ def _load_pipeline(cfg):
     if model in _PIPELINE_CACHE:
         return _PIPELINE_CACHE[model]
 
-    log.info("loading diarization pipeline %s", model)
-    pipe = Pipeline.from_pretrained(model, use_auth_token=os.environ[token_env].strip())
+    target, local = resolve_local_model(cfg, model, "diarization")
+    log.info("loading diarization pipeline %s%s", target, " (local)" if local else "")
+    if local:
+        pipe = Pipeline.from_pretrained(target)
+    else:
+        pipe = Pipeline.from_pretrained(
+            target, use_auth_token=os.environ.get(token_env, "").strip() or None
+        )
 
     device_pref = cfg.get("diarization.pyannote.device", "auto")
     try:

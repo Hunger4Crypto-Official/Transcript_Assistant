@@ -16,6 +16,7 @@ from pathlib import Path
 
 from ..logging_setup import get
 from ..models import Segment
+from ..runtime import is_offline, model_path, require_local
 from .base import ASRError, ASRProvider, ASRResult
 
 log = get("asr.local")
@@ -63,12 +64,21 @@ class LocalWhisperASR(ASRProvider):
         from faster_whisper import WhisperModel
 
         device, compute = self._resolve_device()
-        key = (self.model_name, device, compute)
+        # Resolves to a directory under runtime.models_dir when the weights are
+        # on disk. Offline, this raises with the path it wanted rather than
+        # quietly reaching for HuggingFace.
+        target = require_local(self.cfg, self.model_name, "whisper", "speech recognition")
+        offline = is_offline(self.cfg)
+
+        key = (target, device, compute)
         if key not in _MODEL_CACHE:
-            log.info("loading faster-whisper %s on %s/%s (first run downloads weights)",
-                     self.model_name, device, compute)
+            log.info("loading faster-whisper %s on %s/%s%s",
+                     target, device, compute,
+                     "" if offline else " (downloads weights if not cached)")
             _MODEL_CACHE[key] = WhisperModel(
-                self.model_name, device=device, compute_type=compute
+                target, device=device, compute_type=compute,
+                download_root=str(model_path(self.cfg, "whisper")),
+                local_files_only=offline,
             )
         return _MODEL_CACHE[key]
 

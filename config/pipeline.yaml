@@ -260,3 +260,18 @@ episodes:
   max_seconds: 1800
   # Each episode costs one routing call. This caps a pathological day.
   max_per_recording: 40
+
+runtime:
+  # Offline is an assertion, not a preference. Turn this on and the config
+  # refuses to load while any cloud provider is enabled, every model must
+  # already be on disk, and the ASR and diarization backends are told never to
+  # reach for a download.
+  #
+  # To set up an air-gapped machine, on a networked one first:
+  #   python scripts/fetch_models.py --all
+  # then copy models/ and wheels/ across, and:
+  #   pip install --no-index --find-links wheels -e .
+  #   python run.py doctor --offline
+  offline: false
+  # Where local model weights live. Relative paths resolve against the project.
+  models_dir: "./models"

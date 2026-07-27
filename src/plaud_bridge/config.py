@@ -425,6 +425,21 @@ class Config:
             except re.error as exc:
                 problems.append(f"compliance.redact_patterns.{pattern_name} is not valid regex: {exc}")
 
+        # Offline is an assertion, not a preference. If a cloud provider is
+        # enabled, the claim is already false and startup is the right place to
+        # say so -- not the middle of a run, after the audio has been read.
+        if self.get("runtime.offline", False):
+            from .runtime import cloud_providers_enabled
+
+            offenders = cloud_providers_enabled(self)
+            if offenders:
+                problems.append(
+                    "runtime.offline is true but these cloud providers are enabled: "
+                    + ", ".join(offenders)
+                    + ". Disable them, or turn runtime.offline off. It cannot be "
+                      "both."
+                )
+
         on_missing = self.get("compliance.on_missing_consent", "quarantine")
         if on_missing not in ("quarantine", "flag"):
             problems.append("compliance.on_missing_consent must be 'quarantine' or 'flag'")

@@ -119,6 +119,39 @@ def cmd_doctor(args) -> int:
              "Enable llm.local in pipeline.yaml.",
     ))
 
+    # offline readiness
+    from .runtime import cloud_providers_enabled, is_offline, model_path, resolve_local_model
+
+    offline = is_offline(cfg)
+    if args.offline or offline:
+        rows.append((OK if offline else WARN, "runtime.offline",
+                     "on" if offline else "OFF - set runtime.offline: true to enforce it"))
+
+        offenders = cloud_providers_enabled(cfg)
+        rows.append((
+            OK if not offenders else BAD, "offline:providers",
+            "no cloud provider is enabled" if not offenders
+            else "these would reach the network: " + ", ".join(offenders),
+        ))
+        fatal = fatal or (bool(offenders) and offline)
+
+        for label, configured, subdir in (
+            ("asr", cfg.get("asr.local.model", "large-v3"), "whisper"),
+            ("diarization", cfg.get("diarization.pyannote.model", ""), "diarization"),
+        ):
+            if not configured:
+                continue
+            _target, local = resolve_local_model(cfg, configured, subdir)
+            rows.append((
+                OK if local else (BAD if offline and label == "asr" else WARN),
+                f"offline:{label}",
+                f"'{configured}' on disk" if local
+                else f"'{configured}' NOT in {model_path(cfg, subdir)} "
+                     f"(python scripts/fetch_models.py --{subdir} {configured})",
+            ))
+            if offline and not local and label == "asr":
+                fatal = True
+
     # vault
     ok, why = Vault(cfg.path("vault")).ready()
     rows.append((OK if ok else BAD, "vault", why))
@@ -944,6 +977,8 @@ def build_parser() -> argparse.ArgumentParser:
     sub = ap.add_subparsers(dest="command", required=True)
 
     p = sub.add_parser("doctor", help="preflight every dependency, key, and profile")
+    p.add_argument("--offline", action="store_true",
+                   help="also audit whether this machine could run with no network")
     p.set_defaults(func=cmd_doctor)
 
     p = sub.add_parser("run", help="process everything in the inbox")
