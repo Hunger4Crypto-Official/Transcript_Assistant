@@ -14,6 +14,7 @@ from pathlib import Path
 
 from _fixtures import CLIENT_CALL, FAMILY_DINNER
 from _fixtures import drop as _drop
+from plaud_bridge.db import Database
 from plaud_bridge.digest import DigestBuilder, DigestOptions
 from plaud_bridge.models import Stage
 from plaud_bridge.pipeline import Pipeline
@@ -112,6 +113,36 @@ def test_missing_consent_quarantines(sandbox):
         why = (qdirs[0] / "WHY.md").read_text()
         assert "consent" in why.lower()
         assert "run.py release" in why
+    finally:
+        pipe.close()
+
+
+def test_forcing_a_quarantined_file_again_does_not_orphan_a_second_folder(sandbox):
+    """
+    `--force` means process this file again, not pretend it is a different file.
+
+    It used to mint a fresh recording id, which wrote a second quarantine folder
+    and then failed to index it because content_hash is UNIQUE -- leaving a
+    folder on disk under an id that no index knew about, so `status`, `audit`,
+    and `review` never mentioned it while `release` would still have put it back
+    in the inbox.
+    """
+    cfg, _ = sandbox
+    no_consent = CLIENT_CALL.split("\n", 2)[2]
+    _drop(cfg, "client-no-consent.txt", no_consent)
+
+    pipe = Pipeline(cfg)
+    try:
+        assert pipe.run().quarantined == 1
+        first = {p.name for p in cfg.path("quarantine").iterdir()}
+        assert len(first) == 1
+
+        # The file is still in the inbox, because quarantine does not archive it.
+        assert pipe.run(force=True).quarantined == 1
+        assert {p.name for p in cfg.path("quarantine").iterdir()} == first
+
+        indexed = {row["id"] for row in Database(cfg.path("database")).query(limit=50)}
+        assert first <= indexed, "a quarantine folder exists that the index does not know about"
     finally:
         pipe.close()
 

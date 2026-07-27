@@ -309,6 +309,88 @@ python run.py search "own occupation" --content
 python run.py search "biopsy" --content --profile husband --context 2
 ```
 
+### Ask it a question
+
+Search finds the phrase you remembered. `ask` answers the question you actually
+had.
+
+```bash
+python run.py ask "what did I promise the Hendersons about their term policy?"
+python run.py ask "what has Marcus been coached on?" --profile sales_trainer
+python run.py ask "what did we agree about the school run?" --include-personal
+python run.py ask "what is outstanding?" --save     # keep it, encrypted
+```
+
+Retrieval runs first and is deterministic — it ranks recordings by term overlap
+and recency with no model involved. Only then is a model asked, and only about
+the excerpts that were retrieved.
+
+**Every citation is checked against what was actually sent.** If the model cites
+a recording that was never in the bundle, that citation is dropped and the
+answer says so by id. This is the failure mode that makes "ask your notes"
+features untrustworthy, and it is the one thing here that is tested by deleting
+the check and confirming the tests go red.
+
+With no model configured at all, `ask` still works: you get the ranked excerpts
+and a sentence saying plainly that this is search output rather than an answer.
+It exits 2 when the answer is incomplete — a bounded scan, a trimmed context, a
+dropped citation — and 0 when the honest answer is "nothing in the archive
+matched", because that is a complete answer that happens to be nothing.
+
+The strictest profile in the bundle decides whether the call may leave the
+machine, exactly as ADR-002 decides it for a recording. Personal profiles stay
+out unless you ask for them.
+
+### Follow-ups, and drafts you send yourself
+
+```bash
+python run.py followups                      # what is still owed, oldest first
+python run.py followups --profile insurance_agent
+python run.py followups --draft open         # write drafts into the outbox
+python run.py followups --done fu_3a91c2     # stop it resurfacing
+```
+
+The same promise made across three recordings collapses to one item, aged from
+when you first made it. An eleven-day-old commitment to a client sorts above
+yesterday's.
+
+`--draft` writes a message into `data/outbox/drafts/`. **Nothing is sent. There
+is no send path in the code at all** — no SMTP, no API, no mail configuration to
+fill in. That is the deliberate half of the feature: the useful part is having
+the message written, and the part worth refusing is a tool that mails a summary
+of a private conversation on your behalf.
+
+Drafts are redacted before they are written, even for a profile that has
+`redact_before_llm` turned off. A draft is an outbound document by definition,
+so a profile relaxing redaction for its own analysis does not relax it here.
+
+### Learning across recordings
+
+Every recording used to be analysed as if it were the first one ever seen.
+
+```bash
+python run.py memory                    # what it knows, per profile
+python run.py memory --brief            # the briefing the next analysis will see
+python run.py memory --rebuild          # throw it away and replay the archive
+```
+
+Each profile keeps a ledger of the people, open commitments, and recurring
+topics it has heard, and the next analysis for that profile is made knowing
+them. The ledger is **derived, never authoritative**: it is built from analyses
+already stored, costs no model call, and `--rebuild` reproduces it from the
+archive. If rebuild ever could not, the ledger would have quietly become a
+second uncontrolled copy of your recordings.
+
+Profile isolation is enforced by the cipher, not by convention. Each ledger is
+encrypted under its own AAD, so what the Husband profile knows cannot decrypt
+into an Insurance Agent prompt.
+
+Entries decay, because a brief full of things that stopped being true crowds out
+the ones that did not. A commitment closes only when a later recording says it
+was done — deciding a promise was kept because its words came up again would be
+inventing. And `forget` reaches memory too, or the command's promise would be
+false.
+
 `--content` searches what was said, decrypting the vault where it has to, and
 prints the timestamp and speaker of every hit. It scans **everything** in the
 window by default; `--scan-limit N` bounds the work and then says the answer is
@@ -446,10 +528,25 @@ which means the halt threshold cannot see it.
 ## Tests
 
 ```bash
-python -m pytest tests/ -q
+python -m pytest tests/ -q          # 523 tests
+python scripts/smoke.py             # every CLI route, end to end
 ```
 
-143 tests, no network and no API keys required.
+523 tests, no network and no API keys required.
+
+`scripts/smoke.py` is the other half. It stands up a throwaway project in a temp
+directory, drops transcript fixtures in its inbox, serves its own model on
+loopback, and drives **every route a person can reach** as real subprocesses —
+no ffmpeg, no model weights, no keys, and nothing written anywhere near your own
+`data/`, which it checks byte for byte before and after.
+
+The route list is read from the parser at runtime, so a subcommand added without
+coverage fails the run as `route not covered` rather than quietly shrinking what
+"every route" means. That has already caught two commands landing without
+coverage, and two real defects that only appeared once a quarantined recording
+was in the archive: a search that reported it as unreadable when it had simply
+never been written, and `run --force` orphaning a second quarantine folder under
+an id no index knew about.
 
 The ones that matter most are in **`test_privacy_guarantees.py`**. Every test
 there corresponds to a sentence this README states as a promise: a family

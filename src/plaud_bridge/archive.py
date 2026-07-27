@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any
 
 from .logging_setup import get
-from .models import format_stamp
+from .models import Stage, format_stamp
 from .storage import Vault, VaultError
 
 log = get("archive")
@@ -48,6 +48,11 @@ class SearchResult:
 
     matches: list[Match] = field(default_factory=list)
     unopened: list[str] = field(default_factory=list)
+    # Quarantined recordings are reported apart from unreadable ones. They hold
+    # no searchable content by design -- the gate stopped them before anything
+    # was written -- so telling somebody to check their passphrase, which is
+    # what `unopened` advises, sends them after a problem they do not have.
+    quarantined: list[str] = field(default_factory=list)
     scanned: int = 0
     total: int = 0
     truncated: bool = False
@@ -180,6 +185,14 @@ class Archive:
 
         Returns None when the content exists but cannot be opened, so callers
         can tell "there is nothing here" apart from "I cannot read what is here".
+
+        A quarantined recording is the third case and reads as the first. The
+        gate stops it before anything is persisted, so the index knows its name
+        and nothing else -- there is no artifact, and there never was one. It
+        used to come back as None, which every caller printed as "could not be
+        opened, set PLAUD_BRIDGE_PASSPHRASE": advice that cannot work, about a
+        problem that does not exist, and an exit code of 2 on every search,
+        export, and answer for as long as the recording sat in quarantine.
         """
         payload = self._payload(row)
         transcript = payload.get("transcript") or {}
@@ -193,6 +206,8 @@ class Archive:
 
         path = str(payload.get("artifact_paths", {}).get("analysis", ""))
         if not path or not Path(path).exists():
+            if str(row.get("stage") or "") == Stage.QUARANTINED.value:
+                return payload
             return None
         try:
             return json.loads(self.vault.read_text(Path(path), row["id"]))
@@ -250,6 +265,9 @@ class Archive:
             segments = self.segments(row)
             if segments is None:
                 unopened.append(f"{row['id']}  {row['source_name']}")
+                continue
+            if not segments and str(row.get("stage") or "") == Stage.QUARANTINED.value:
+                result.quarantined.append(f"{row['id']}  {row['source_name']}")
                 continue
 
             when = (row["recorded_at"] or row["ingested_at"] or "")[:16].replace("T", " ")

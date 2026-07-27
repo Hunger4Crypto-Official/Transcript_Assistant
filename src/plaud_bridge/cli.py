@@ -457,6 +457,18 @@ def _search_content(cfg, db, args) -> int:
     )
     matches, unopened = result.matches, result.unopened
 
+    def _say_quarantined() -> None:
+        if not result.quarantined:
+            return
+        print(f"{len(result.quarantined)} recording(s) are quarantined and hold no "
+              f"searchable content:")
+        for entry in result.quarantined[:20]:
+            print(f"  {entry}")
+        if len(result.quarantined) > 20:
+            print(f"  ... and {len(result.quarantined) - 20} more")
+        print("  The gate stopped these before anything was stored. Review them and, "
+              "if they are fine,\n  run.py release <id> to put them back in the inbox.\n")
+
     if not matches and not unopened:
         print(f'\nnothing matching "{args.query}" was said in the '
               f'{result.scanned} recording(s) searched')
@@ -466,6 +478,7 @@ def _search_content(cfg, db, args) -> int:
             print()
             return 2
         print()
+        _say_quarantined()
         return 0
 
     by_recording: dict[str, list] = {}
@@ -499,6 +512,7 @@ def _search_content(cfg, db, args) -> int:
         if len(unopened) > 20:
             print(f"  ... and {len(unopened) - 20} more")
         print("  Set PLAUD_BRIDGE_PASSPHRASE if these are encrypted.\n")
+    _say_quarantined()
     return 0 if result.complete else 2
 
 
@@ -538,9 +552,17 @@ def cmd_ask(args) -> int:
                 print(f"NOT saved: {exc}\n")
                 return 1
 
+        if answer.usage_error:
+            return 1
+
+        # "Nothing in the archive matched" is a complete answer that happens to
+        # be nothing, and `search --content` returns 0 for exactly that. What
+        # earns a 2 is an answer the archive could not fully support: excerpts
+        # returned because no model was reachable, a recording that would not
+        # open, a citation dropped, or context trimmed to fit.
         incomplete = bool(
-            answer.degraded or answer.unopened or answer.dropped_citations
-            or answer.truncated
+            (answer.degraded and answer.bundle_chars)
+            or answer.unopened or answer.dropped_citations or answer.truncated
         )
         return 2 if incomplete else 0
     finally:

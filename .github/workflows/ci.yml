@@ -55,7 +55,31 @@ jobs:
           python-version: "3.12"
           cache: pip
       - run: pip install ruff
-      - run: ruff check src tests run.py
+      - run: ruff check src tests scripts run.py
+
+  smoke:
+    name: smoke (every CLI route)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -e ".[dev]"
+
+      # No ffmpeg, no model weights, no keys. The suite stands up its own
+      # throwaway project and serves its own model on loopback, so a red X here
+      # means the shipped command line broke rather than a unit test did. It
+      # also fails when a new subcommand lands with no coverage, which is the
+      # property that keeps the claim honest.
+      - name: Every route a person can reach
+        env:
+          GROQ_API_KEY: ""
+          ANTHROPIC_API_KEY: ""
+          HUGGINGFACE_TOKEN: ""
+          PLAUD_BRIDGE_PASSPHRASE: ""
+        run: python scripts/smoke.py
 
   compliance-guards:
     name: compliance guards

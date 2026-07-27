@@ -436,6 +436,76 @@ does not ship at all.
 
 ---
 
+## ADR-024: A citation names something that was actually sent, or it is dropped
+
+**Decision.** `ask` validates every citation the model returns against the
+bundle it was given. A citation naming a recording that was not in the bundle is
+dropped and reported by id. A citation whose timestamp does not exist is snapped
+to the retrieved excerpt whose words best match the quote, never to a number the
+model chose.
+
+**Why.** The whole value of answering from an archive is that the answer is
+anchored to something that was said. A fabricated citation inverts that: it
+makes an invented claim *more* believable than an uncited one, because it comes
+with a recording id and a timestamp that look checkable and are not.
+
+This is the one failure mode that would make the feature worse than the search
+it replaces, so it is verified by deleting the check and confirming the tests go
+red rather than by reading the code and being satisfied.
+
+---
+
+## ADR-025: Drafting has no send path, by construction
+
+**Decision.** `followups --draft` writes a file into the outbox. There is no
+SMTP client, no mail API, no address book, and no configuration key that would
+enable one. Drafts are redacted before they are written regardless of the
+profile's `redact_before_llm` setting.
+
+**Why.** The feature this replaces auto-summarises a meeting and mails it out.
+The useful half is having the message written; the half worth refusing is
+software deciding, unattended, that a summary of a private conversation should
+leave the machine and go to a named person. A confirmation prompt is not the
+answer, because the failure is not "the user did not notice", it is "the user
+noticed on the fourth of four occasions".
+
+Unconditional redaction diverges from `export`, deliberately. A profile turning
+redaction off is a statement about its own analysis, which stays here. A draft
+is outbound by definition.
+
+---
+
+## ADR-026: Memory is derived, never authoritative
+
+**Decision.** The per-profile ledgers are built only from analyses already
+stored, hold no content the archive does not, and can be discarded and rebuilt
+from the archive at any time. `memory --rebuild` reproducing the ledger is a
+test, not a convenience. `forget` clears memory as part of the same command.
+
+**Why.** A ledger that could not be rebuilt would have become a second copy of
+your recordings — one that no retention sweep expires, `verify` never checks,
+and `forget` does not reach. That is the exact shape of the thing this project
+exists to avoid, arrived at by accident rather than by decision.
+
+Profile isolation is enforced by encrypting each ledger under its own AAD rather
+than by the code being careful. Care is a property of the code as written today;
+a decryption that fails is a property of the file.
+
+---
+
+## ADR-027: A commitment closes only when something says it was done
+
+**Decision.** An open commitment is closed by a later recording that names it as
+completed, in a declared closure field. It is never closed by its words coming
+up again, by time passing, or by a similar commitment appearing.
+
+**Why.** Both errors are possible and only one is recoverable. A commitment left
+open after it was kept is visible: it sits in `followups` and you close it. A
+commitment closed because the topic was mentioned again disappears silently, and
+what disappears is a promise you made to a client or a child.
+
+---
+
 ## Known limitations
 
 1. **Crosstalk breaks diarization.** When two people talk over each other,

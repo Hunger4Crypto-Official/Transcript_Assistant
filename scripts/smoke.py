@@ -470,16 +470,17 @@ ROUTES: dict[str, list[Check]] = {
           creates="{out}/digest.html"),
     ],
     # Exit 2 from a content search means "the answer is incomplete", which is an
-    # answer and not a crash. Two things produce it here: --scan-limit, which is
-    # the point of the flag, and the quarantined fixture, which the archive
-    # counts as a recording it could not open. See the note on `export` below.
+    # answer and not a crash. Only --scan-limit should produce it here. The
+    # quarantined fixture used to as well, permanently, because the archive
+    # reported a recording it had deliberately never written as one it could not
+    # open; these checks demand 0 so that regression cannot come back quietly.
     "search": [
         c("search", "factfind", quick=True),
-        c("search", "elimination period", "--content", contains="hit(s)", expect=(0, 2)),
-        c("search", "elimination period", "--content", "--context", "2", expect=(0, 2)),
+        c("search", "elimination period", "--content", contains="hit(s)"),
+        c("search", "elimination period", "--content", "--context", "2"),
         c("search", "elimination period", "--content", "--scan-limit", "1", expect=(0, 2)),
-        c("search", "coverage", "--content", "--per-recording", "1", expect=(0, 2)),
-        c("search", "nothing was ever said about this", "--content", expect=(0, 2)),
+        c("search", "coverage", "--content", "--per-recording", "1"),
+        c("search", "nothing was ever said about this", "--content"),
         c("search", "factfind", "--profile", "insurance_agent", "--days", "30", "--limit", "5"),
     ],
     "open": [
@@ -496,40 +497,43 @@ ROUTES: dict[str, list[Check]] = {
         c("open", "rec_does_not_exist", expect=(1,)),
     ],
     "verify": [c("verify", contains="artifact(s) indexed", quick=True)],
-    # `ask` exits 2 for the same reason `search --content` does: an answer that
-    # could not see everything is incomplete, and the quarantined fixture is
-    # permanently one of the things it cannot open.
+    # `ask` exits 2 when the answer is incomplete, for the same reason
+    # `search --content` does. A quarantined recording is not one of those
+    # reasons: it holds nothing to read, which is different from something
+    # unreadable, and these checks demand 0 to keep it that way.
     "ask": [
-        c("ask", "what did I promise Dana?", expect=(0, 2), quick=True),
-        c("ask", "what did I promise Dana?", "--profile", "insurance_agent", expect=(0, 2)),
-        c("ask", "what is outstanding?", "--days", "30", "--limit", "5", expect=(0, 2)),
-        c("ask", "what did we agree at home?", "--include-personal", expect=(0, 2)),
-        c("ask", "what did I promise Dana?", "--local-only", expect=(0, 2)),
-        c("ask", "what did I promise Dana?", "--save", contains="saved, encrypted",
-          expect=(0, 2)),
+        c("ask", "what did I promise Dana?", quick=True),
+        c("ask", "what did I promise Dana?", "--profile", "insurance_agent"),
+        c("ask", "what is outstanding?", "--days", "30", "--limit", "5"),
+        c("ask", "what did we agree at home?", "--include-personal"),
+        c("ask", "what did I promise Dana?", "--local-only"),
+        c("ask", "what did I promise Dana?", "--save", contains="saved, encrypted"),
+        # A question the archive has nothing to say about is a complete answer
+        # that happens to be "nothing", and exits 0 like the search that backs
+        # it. A profile that does not exist is the asker's mistake, and exits 1.
+        c("ask", "nothing was ever said about this at all"),
+        c("ask", "anything", "--profile", "no-such-profile", expect=(1,),
+          contains="no profile called"),
     ],
-    # Exit 2 means "some recordings were omitted because they would not open".
-    # A quarantined recording produces it permanently: the gate refuses to write
-    # its content anywhere, so `Archive.full_record` sees withheld content with
-    # no artifact behind it and reports the recording as undecryptable. Every
-    # export after the first quarantine therefore exits 2 and advises setting a
-    # passphrase that would not help. That is a defect in archive.py, not in the
-    # export route, and it is left visible here rather than dodged by arranging
-    # the fixtures to avoid it -- a real archive contains quarantined files.
+    # Exit 2 means "some recordings were omitted because they would not open",
+    # and the fixture archive contains a quarantined recording, which is exactly
+    # the case that used to trigger it wrongly: the gate never writes that
+    # recording's content anywhere, and reporting "could not be decrypted" for a
+    # thing that was deliberately never encrypted sent people after a passphrase
+    # problem they did not have. These demand 0 so the distinction stays real.
     "export": [
-        c("export", expect=(0, 2), quick=True),
-        c("export", "--transcripts", expect=(0, 2)),
-        c("export", "--include-personal", expect=(0, 2)),
-        c("export", "--title", "Handover", expect=(0, 2)),
-        c("export", "--profile", "insurance_agent", "--days", "30", "--limit", "5",
-          expect=(0, 2)),
+        c("export", quick=True),
+        c("export", "--transcripts"),
+        c("export", "--include-personal"),
+        c("export", "--title", "Handover"),
+        c("export", "--profile", "insurance_agent", "--days", "30", "--limit", "5"),
         # A personal profile is refused unless it is asked for explicitly.
         c("export", "--profile", "father", expect=(1,)),
-        c("export", "--out", "{out}/export.md", creates="{out}/export.md", expect=(0, 2)),
+        c("export", "--out", "{out}/export.md", creates="{out}/export.md"),
         c("export", "--format", "html", "--out", "{out}/export.html",
-          creates="{out}/export.html", expect=(0, 2)),
+          creates="{out}/export.html"),
         c("export", "--transcripts", "--format", "html", "--out", "{out}/export-t.html",
-          creates="{out}/export-t.html", expect=(0, 2)),
+          creates="{out}/export-t.html"),
     ],
     "audit": [
         c("audit", quick=True),
@@ -589,6 +593,23 @@ ROUTES: dict[str, list[Check]] = {
         c("new-profile", "smoke_mentor", expect=(1,)),
     ],
     "voices": [c("voices", contains="active voice", quick=True)],
+    # Memory is derived from what the run already stored, so by the time this
+    # route is reached the ledgers exist. --rebuild is the interesting one: it
+    # throws them away and replays the archive, and it is the answer to believe
+    # whenever the ledger and the archive disagree.
+    "memory": [
+        c("memory", contains="insurance_agent", quick=True),
+        c("memory", "--profile", "insurance_agent"),
+        c("memory", "--brief"),
+        c("memory", "--rebuild", contains="replayed"),
+        # A profile that does not exist is a typo, and a typo that prints an
+        # empty ledger reads as "nothing was recorded" rather than "no such
+        # profile". It exits 1 and says which profiles are real.
+        c("memory", "--profile", "no-such-profile", expect=(1,), contains="unknown profile"),
+        # Removing a recording from the ledgers is the half of `forget` that
+        # would otherwise keep feeding a deleted conversation into prompts.
+        c("memory", "--forget", "{doomed}", contains="removed"),
+    ],
     # The speaker group is the one place where the useful work genuinely cannot
     # happen here: a voiceprint is an embedding of real speech, which needs
     # ffmpeg to prepare a clip and the pyannote embedding weights to turn it
@@ -635,7 +656,7 @@ ROUTES: dict[str, list[Check]] = {
 # one already deleted what it wanted to read. `run` is first because every
 # other route needs what it produces.
 ROUTE_ORDER = (
-    "doctor", "run", "status", "profiles", "voices", "digest", "search", "open",
+    "doctor", "run", "status", "profiles", "voices", "memory", "digest", "search", "open",
     "verify", "ask", "export", "audit", "followups", "review", "speakers list", "speakers enroll",
     "speakers identify", "speakers forget", "release", "watch", "new-profile",
     "retention", "forget",

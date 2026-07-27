@@ -201,6 +201,12 @@ class Answer:
     provider: str = ""
     cost_usd: float = 0.0
     degraded: bool = False
+    # `degraded` covers three different situations and the caller has to tell
+    # them apart to pick an exit code. A question nobody could parse is the
+    # asker's mistake; an archive with nothing matching is a complete answer
+    # that happens to be "nothing"; a model that could not be reached is a real
+    # incompleteness. Only the last two are about the archive at all.
+    usage_error: bool = False
     note: str = ""
 
     question: str = ""
@@ -850,12 +856,14 @@ def ask(question: str, cfg, db, archive, *, profile: str | None = None,
 
     if not question:
         answer.degraded = True
+        answer.usage_error = True
         answer.text = "No question was asked."
         answer.note = 'Ask something, for example: run.py ask "what did I promise Marcus?"'
         return answer
 
     if profile and profile not in cfg.profiles:
         answer.degraded = True
+        answer.usage_error = True
         answer.text = f"There is no profile called '{profile}'."
         answer.note = (
             "Known profiles: " + ", ".join(sorted(cfg.profiles)) + ". "

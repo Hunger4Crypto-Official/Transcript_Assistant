@@ -144,6 +144,14 @@ class Pipeline:
             kind=kind,
             recorded_at=datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc),
         )
+        if existing:
+            # --force means process this file again, not pretend it is a
+            # different file. A fresh id here wrote a second quarantine folder
+            # under a new id, then failed to index it because content_hash is
+            # UNIQUE -- and the log blamed a concurrent process for something a
+            # flag had done. The folder that survived belonged to a recording no
+            # index knew about, which is the one state nothing can clean up.
+            rec.id = existing
         self.db.audit("ingest", f"{path.name} ({stat.st_size} bytes)", rec.id)
         log.info("processing %s (%s, %.1fMB)", path.name, kind, stat.st_size / 1_048_576)
 

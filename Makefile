@@ -1,4 +1,4 @@
-.PHONY: help setup doctor run digest week verify review test clean
+.PHONY: help setup doctor run digest week verify review test smoke smoke-quick clean
 
 help:
 	@echo "make setup    install dependencies"
@@ -9,6 +9,8 @@ help:
 	@echo "make verify   confirm every artifact still opens"
 	@echo "make review   what the review cadence says is due"
 	@echo "make test     run the test suite"
+	@echo "make smoke    drive every CLI route against a throwaway project"
+	@echo "make smoke-quick  the same routes, one check each"
 	@echo "make clean    remove work scratch and caches"
 
 setup:
@@ -37,6 +39,12 @@ review:
 
 test:
 	python -m pytest tests/ -q
+
+smoke:
+	python scripts/smoke.py
+
+smoke-quick:
+	python scripts/smoke.py --quick
 
 clean:
 	rm -rf data/work .pytest_cache

@@ -1,6 +1,69 @@
 # Changelog
 
-## Unreleased — named speakers
+## Unreleased — names, answers, memory, and follow-through
+
+### Ask the archive a question
+
+`ask "what did I promise the Hendersons?"` answers from what was actually said.
+Retrieval runs first and is deterministic; only the excerpts it found are ever
+shown to a model.
+
+- Every citation is validated against the bundle that was actually sent. One
+  naming a recording that was never sent is dropped and reported by id. See
+  ADR-024, and the mutation test that deletes the check to prove it matters.
+- With no model configured the command still works, returning ranked excerpts
+  and saying plainly that they are search output rather than an answer.
+- Exits 2 when the answer is incomplete; 0 when "nothing matched" is the
+  complete and honest answer.
+- The strictest profile in the bundle decides whether the call may leave the
+  machine. Personal profiles stay out unless asked for.
+
+### It carries what it knows forward
+
+Every recording used to be analysed as though it were the first one ever seen.
+
+- Each profile keeps a ledger of people, open commitments, and recurring topics,
+  and the next analysis for that profile is made knowing them.
+- The ledger is derived and rebuildable — `memory --rebuild` replays the archive
+  — so it can never quietly become a second uncontrolled copy of it. ADR-026.
+- Profile isolation is enforced by the cipher, not by convention: each ledger is
+  encrypted under its own AAD.
+- Entries decay. A commitment closes only when a later recording says it was
+  done, because guessing closure from repetition would be inventing. ADR-027.
+- `forget` now reaches memory, or its promise would be false.
+
+### Follow-ups, drafted and never sent
+
+- Commitments are collected across recordings, deduplicated by content so the
+  same promise in three conversations is one item, and aged so the oldest debt
+  sorts first.
+- `--done` persists, so a closed item stops resurfacing.
+- `--draft` writes into the outbox. There is no send path in the code at all —
+  no SMTP, no mail API, no configuration for one. ADR-025.
+- Drafts are redacted unconditionally, diverging from `export` on purpose: a
+  draft is outbound by definition.
+
+### A smoke suite that drives the real command line
+
+`scripts/smoke.py` stands up a throwaway project, serves its own model on
+loopback, and runs every route as real subprocesses — no ffmpeg, no weights, no
+keys, and it verifies your own `data/` is byte for byte unchanged afterwards.
+
+The route list is read from the parser at runtime, so a new subcommand with no
+coverage fails the run instead of quietly shrinking what "every route" means.
+
+**Two defects it found, both fixed:**
+
+- A quarantined recording made `search --content`, `export`, and `ask` exit 2
+  forever, advising a passphrase fix that could not help. The gate stops those
+  recordings before anything is written, and the archive was reporting "could
+  not open" for content that had deliberately never been stored.
+- `run --force` on a still-quarantined file minted a new recording id, wrote a
+  second quarantine folder, then failed to index it on the UNIQUE content hash
+  and blamed a concurrent process. The surviving folder belonged to a recording
+  no index knew about.
+
+## Named speakers
 
 ### Speakers have names now, or they stay numbered
 
