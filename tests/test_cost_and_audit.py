@@ -92,6 +92,46 @@ def test_routing_and_analysis_spend_both_land_on_the_recording(tmp_path, monkeyp
         pipe.close()
 
 
+def test_asking_a_question_is_spend_that_status_can_see(tmp_path, monkeypatch):
+    """
+    ADR-014 says spend is counted wherever it is incurred. `ask` had a cost and
+    no recording to hang it on, so it was spent without appearing anywhere a
+    person would look -- fifty questions against a cloud model, and `status`
+    still reported only what ingestion had cost.
+    """
+    cfg, _ = build_sandbox(tmp_path, monkeypatch, stub=StubLLM(cost_usd=CALL_COST))
+    drop(cfg, "client-marcus.txt", CLIENT_CALL)
+    pipe = Pipeline(cfg)
+    try:
+        pipe.run()
+        pipeline_cost = pipe.db.stats()["total_cost_usd"]
+    finally:
+        pipe.close()
+
+    from plaud_bridge import ask as ask_module
+    from plaud_bridge.archive import Archive
+    from plaud_bridge.llm.base import LLMResponse
+
+    def fake(cfg_, system, user, local_only=False, max_tokens=None):
+        return ({"answer": "Two quote options by Thursday.", "citations": [],
+                 "confidence": "high", "unanswered": ""},
+                LLMResponse(text="", provider="stub", model="stub-1",
+                            cost_usd=CALL_COST))
+
+    monkeypatch.setattr(ask_module, "complete_json", fake)
+
+    db = Database(cfg.path("database"))
+    try:
+        ask_module.ask("what did I promise Marcus?", cfg, db, Archive(cfg, db))
+        stats = db.stats()
+        assert stats["by_source"]["ask"]["calls"] == 1
+        assert stats["by_source"]["ask"]["cost_usd"] == pytest.approx(CALL_COST)
+        assert stats["pipeline_cost_usd"] == pytest.approx(pipeline_cost)
+        assert stats["total_cost_usd"] == pytest.approx(pipeline_cost + CALL_COST)
+    finally:
+        db.close()
+
+
 def test_a_quarantined_recording_still_counts_toward_run_spend(tmp_path, monkeypatch):
     """It routed before it was stopped. That call was billed."""
     cfg, _ = build_sandbox(tmp_path, monkeypatch, stub=StubLLM(cost_usd=CALL_COST))

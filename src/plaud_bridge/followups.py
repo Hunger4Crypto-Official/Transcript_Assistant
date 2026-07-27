@@ -729,7 +729,7 @@ def draft(target: list[FollowUp] | FollowUp | str, cfg, *, db=None, archive=None
 
     subject, body, phrased_by = _template_message(redacted)
     if wants_llm:
-        written = _llm_message(cfg, redacted, local_only)
+        written = _llm_message(cfg, redacted, local_only, db)
         if written is not None:
             subject, body, phrased_by = written
 
@@ -846,7 +846,8 @@ def _template_message(items: list[FollowUp]) -> tuple[str, str, str]:
     return subject, "\n".join(lines), "template (no model involved)"
 
 
-def _llm_message(cfg, items: list[FollowUp], local_only: bool) -> tuple[str, str, str] | None:
+def _llm_message(cfg, items: list[FollowUp], local_only: bool,
+                 db=None) -> tuple[str, str, str] | None:
     """
     Ask a model to phrase the draft. Returns None when it could not, which is
     not an error: the template is a complete answer on its own.
@@ -889,6 +890,14 @@ def _llm_message(cfg, items: list[FollowUp], local_only: bool) -> tuple[str, str
     if not body:
         log.warning("the model returned no draft body; using the template instead")
         return None
+    # ADR-014: phrasing a draft costs money and has no recording to charge it
+    # to, so it is recorded against the run or it is spent invisibly.
+    if db is not None:
+        try:
+            db.record_spend("draft", response.cost_usd, response.provider, response.model)
+        except Exception as exc:  # noqa: BLE001 - an unrecorded cost must not lose the draft
+            log.warning("could not record what this draft cost: %s", exc)
+
     provider = f"{response.provider}/{response.model}" if response.provider else "model"
     return subject or "Following up", body, f"{provider}, local_only={local_only}"
 

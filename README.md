@@ -416,6 +416,12 @@ know about, and never deletes anything.
 If the vault is locked it reports encrypted artifacts as *unchecked*, not as
 healthy. It will not claim a clean bill it could not confirm.
 
+`verify` also counts the files that live in the vault and the outbox without
+belonging to any recording — enrolled voiceprints, saved answers, drafts — and
+names them as such rather than listing them as debris. Anything else in there is
+still reported as an orphan, which is the point: a `verify` you have learned to
+skim is worse than none.
+
 ### Export
 
 ```bash

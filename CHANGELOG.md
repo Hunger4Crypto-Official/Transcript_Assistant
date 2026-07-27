@@ -43,6 +43,18 @@ Every recording used to be analysed as though it were the first one ever seen.
 - Drafts are redacted unconditionally, diverging from `export` on purpose: a
   draft is outbound by definition.
 
+### Two things the new features quietly broke, found afterwards
+
+- `verify` reported voiceprints, saved answers, and drafts as "files on disk
+  that the index does not know about", next to advice about rebuilt databases
+  that could not apply to them. Three features had started writing into the
+  vault and the outbox on purpose. They are now counted and named as
+  non-artifacts, and a real orphan still stands out beside them -- the fix is
+  not "stop looking in the vault".
+- `ask` and LLM-phrased drafts spent money that `status` could not see, which
+  contradicts ADR-014. Spend that belongs to no recording now has a table of its
+  own, and `status` breaks the total down by where it went.
+
 ### A smoke suite that drives the real command line
 
 `scripts/smoke.py` stands up a throwaway project, serves its own model on
@@ -63,7 +75,7 @@ coverage fails the run instead of quietly shrinking what "every route" means.
   and blamed a concurrent process. The surviving folder belonged to a recording
   no index knew about.
 
-## Named speakers
+## Previously — named speakers
 
 ### Speakers have names now, or they stay numbered
 
@@ -146,7 +158,7 @@ longest recording you own was the one that ran the machine out of memory.
 
 ---
 
-## Unreleased — full audit
+## Previously — full audit
 
 A deliberate audit of the code against its own claims. Everything below shipped,
 and none of it raised an exception — which is what made it worth finding.
@@ -212,7 +224,7 @@ and none of it raised an exception — which is what made it worth finding.
 
 ---
 
-## Unreleased — getting things back out
+## Previously — getting things back out
 
 The pipeline could put recordings in. Little could get them out again.
 
@@ -268,7 +280,7 @@ The pipeline could put recordings in. Little could get them out again.
 
 ---
 
-## Unreleased — voice, templates, and the review cadence
+## Previously — voice, templates, and the review cadence
 
 ### Voice
 
@@ -332,7 +344,7 @@ quarterly, and annually. Nothing implemented it.
 
 ---
 
-## Unreleased — unpacking and enforcement
+## Previously — unpacking and enforcement
 
 The repository previously held the project as a `.tar.gz` with a few files
 unpacked beside it. This release makes it a working repository, then fixes what

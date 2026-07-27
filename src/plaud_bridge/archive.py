@@ -18,6 +18,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from .diarize.voiceprint import STORE_RELATIVE as VOICEPRINT_STORE
 from .logging_setup import get
 from .models import Stage, format_stamp
 from .storage import Vault, VaultError
@@ -80,6 +81,11 @@ class ArtifactState:
 class VerifyReport:
     checked: list[ArtifactState] = field(default_factory=list)
     orphans: list[Path] = field(default_factory=list)
+    # Files that live in the vault or the outbox deliberately and are not
+    # artifacts of any recording: voiceprints, saved answers, drafts. They are
+    # counted and named rather than hidden, because a `verify` that quietly
+    # skips whole directories is one you cannot use to find a real orphan.
+    known: list[tuple[Path, str]] = field(default_factory=list)
     unreachable: bool = False       # the vault could not be opened at all
 
     @property
@@ -114,6 +120,15 @@ class VerifyReport:
             if state.detail:
                 lines.append(f"                   {state.detail}")
 
+        if self.known:
+            lines.append("")
+            by_label: dict[str, int] = {}
+            for _path, label in self.known:
+                by_label[label] = by_label.get(label, 0) + 1
+            summary = ", ".join(f"{count} {label}" for label, count in sorted(by_label.items()))
+            lines.append(f"{len(self.known)} file(s) that belong here but are not "
+                         f"artifacts: {summary}.")
+
         if self.orphans:
             lines.append("")
             lines.append(f"{len(self.orphans)} file(s) on disk that the index does not know about:")
@@ -134,6 +149,16 @@ class VerifyReport:
     @property
     def healthy(self) -> bool:
         return not self.problems and not self.unreachable
+
+
+def _labelled(path: Path, expected: list[tuple[Path, str]]) -> str:
+    """The label for a deliberate non-artifact, or "" when this is a real orphan."""
+    resolved = path.resolve()
+    for candidate, label in expected:
+        candidate = candidate.resolve() if candidate.exists() else candidate
+        if resolved == candidate or candidate in resolved.parents:
+            return label
+    return ""
 
 
 def owned_roots(cfg) -> list[Path]:
@@ -344,14 +369,41 @@ class Archive:
 
             report.checked.append(state)
 
+        expected = self._non_artifacts()
         for root in (self.cfg.path("vault"), self.cfg.path("outbox")):
             if not root.is_dir():
                 continue
             for path in sorted(root.rglob("*")):
-                if path.is_file() and path.resolve() not in indexed:
+                if not path.is_file() or path.resolve() in indexed:
+                    continue
+                label = _labelled(path, expected)
+                if label:
+                    report.known.append((path, label))
+                else:
                     report.orphans.append(path)
 
         return report
+
+    def _non_artifacts(self) -> list[tuple[Path, str]]:
+        """
+        Where the features that are not the pipeline are allowed to write.
+
+        Three things live in the vault or the outbox without belonging to any
+        recording, and every one of them would otherwise be reported as a file
+        the index does not know about, next to advice about rebuilt databases
+        and half-finished runs that could not apply to it. Being told your
+        voiceprints are debris, every time you check the archive is healthy, is
+        how a person learns to skim the one command whose job is to be read.
+
+        Listing them here rather than skipping their directories is deliberate:
+        an unexpected file inside data/vault/ask/ is still an orphan.
+        """
+        vault, outbox = self.cfg.path("vault"), self.cfg.path("outbox")
+        return [
+            (vault / f"{VOICEPRINT_STORE}.enc", "enrolled voiceprints"),
+            (vault / "ask", "saved answers"),
+            (outbox / "drafts", "follow-up drafts"),
+        ]
 
     # =====================================================================
     # Forget

@@ -988,6 +988,13 @@ def ask(question: str, cfg, db, archive, *, profile: str | None = None,
 
     answer.provider = response.provider
     answer.cost_usd = response.cost_usd
+    # ADR-014: spend is counted wherever it is incurred. A question costs money
+    # and has no recording to hang it on, so it goes to the spend table or it
+    # goes nowhere, and `status` would keep reporting only what ingestion cost.
+    try:
+        db.record_spend("ask", response.cost_usd, response.provider, response.model)
+    except Exception as exc:  # noqa: BLE001 - an unrecorded cost must not lose the answer
+        log.warning("could not record what this question cost: %s", exc)
     answer.text = str(data.get("answer") or "").strip()
     answer.unanswered = str(data.get("unanswered") or "").strip()
     confidence = str(data.get("confidence") or "").strip().lower()

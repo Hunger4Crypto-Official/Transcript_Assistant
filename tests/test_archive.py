@@ -173,6 +173,56 @@ def test_verify_reports_orphans_without_deleting_them(tmp_path, monkeypatch):
         db.close()
 
 
+def test_the_features_that_are_not_the_pipeline_are_not_called_debris(tmp_path, monkeypatch):
+    """
+    A voiceprint, a saved answer, and a draft all live in the vault or the
+    outbox on purpose. Reporting them as files the index does not know about --
+    beside advice about rebuilt databases and half-finished runs -- teaches a
+    person to skim the one command whose whole job is to be read.
+    """
+    cfg = _processed(tmp_path, monkeypatch)
+    voiceprints = cfg.path("vault") / "voiceprints.enc"
+    voiceprints.write_bytes(b"PBV1 pretend")
+    answer = cfg.path("vault") / "ask" / "20260727T120000Z.enc"
+    answer.parent.mkdir(parents=True, exist_ok=True)
+    answer.write_bytes(b"PBV1 pretend")
+    draft = cfg.path("outbox") / "drafts" / "DRAFT-chase-marcus.md"
+    draft.parent.mkdir(parents=True, exist_ok=True)
+    draft.write_text("a draft nobody sent")
+
+    db = Database(cfg.path("database"))
+    try:
+        report = Archive(cfg, db).verify()
+        assert not report.orphans, f"deliberate files reported as orphans: {report.orphans}"
+        assert {label for _path, label in report.known} == {
+            "enrolled voiceprints", "saved answers", "follow-up drafts",
+        }
+        rendered = report.render()
+        assert "belong here but are not artifacts" in rendered
+        assert "does not know about" not in rendered
+    finally:
+        db.close()
+
+
+def test_a_real_orphan_still_stands_out_beside_them(tmp_path, monkeypatch):
+    """
+    The fix must not become "stop looking in the vault". Naming the directories
+    that belong to something is different from skipping them.
+    """
+    cfg = _processed(tmp_path, monkeypatch)
+    (cfg.path("vault") / "voiceprints.enc").write_bytes(b"PBV1 pretend")
+    stray = cfg.path("vault") / "left-behind.enc"
+    stray.write_bytes(b"not indexed")
+
+    db = Database(cfg.path("database"))
+    try:
+        report = Archive(cfg, db).verify()
+        assert report.orphans == [stray]
+        assert [label for _p, label in report.known] == ["enrolled voiceprints"]
+    finally:
+        db.close()
+
+
 # =========================================================================
 # Forget
 # =========================================================================

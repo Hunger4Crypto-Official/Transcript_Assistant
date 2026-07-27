@@ -171,6 +171,14 @@ def cmd_doctor(args) -> int:
         "still beats `search --content` but is not an answer",
     ))
 
+    # memory
+    memory_ok, memory_why = MemoryStore(cfg).ready()
+    rows.append((
+        OK if memory_ok else WARN, "memory",
+        "ready" if memory_ok
+        else f"{memory_why} Nothing will be carried forward between recordings.",
+    ))
+
     # offline readiness
     from .runtime import cloud_providers_enabled, is_offline, model_path, resolve_local_model
 
@@ -412,6 +420,12 @@ def cmd_status(args) -> int:
         print(f"  recordings   {stats['recordings']}")
         print(f"  audio hours  {stats['audio_hours']}")
         print(f"  api spend    ${stats['total_cost_usd']}")
+        if stats["by_source"]:
+            # Asking questions and phrasing drafts cost money too, and it used
+            # to be spent without appearing anywhere a person would look.
+            print(f"    pipeline   ${stats['pipeline_cost_usd']}")
+            for source, entry in sorted(stats["by_source"].items()):
+                print(f"    {source:10s} ${entry['cost_usd']}  ({entry['calls']} call(s))")
         print("\n  by profile")
         for pid, count in sorted(stats["by_profile"].items(), key=lambda kv: -kv[1]):
             name = cfg.profiles[pid].name if pid in cfg.profiles else pid
