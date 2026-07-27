@@ -345,3 +345,46 @@ followups:
   # Ceiling on how many follow-ups go into one draft. A message listing forty
   # things is not a follow-up, it is an invoice.
   max_per_draft: 25
+
+ask:
+  # Conversational question answering over the archive. Retrieval first: the
+  # ranking below is deterministic and runs with no model configured at all,
+  # which is also the fallback. Without a usable provider `ask` returns the
+  # excerpts and says plainly that they are search output rather than an answer.
+
+  # How far back a question looks by default. 0 searches the whole archive.
+  days: 90
+  # How many recordings may contribute to one answer. Past a handful the model
+  # starts averaging conversations together instead of citing one of them.
+  limit: 6
+  # How many recordings may be OPENED while ranking. This bounds work, not
+  # results, exactly like search's --scan-limit, and a bounded answer says it
+  # was bounded. 0 opens everything in the window.
+  scan_limit: 200
+  # The context ceiling, in characters. Excerpts past it are dropped in ranked
+  # order, and both the prompt and the answer say how many. Raise it if your
+  # local model has the room; a bigger bundle is not automatically a better
+  # answer, and it is always a slower one.
+  max_context_chars: 24000
+  # Excerpts taken from any one recording, and how many neighbouring segments
+  # travel with each. A promise usually spans two turns, so one either side is
+  # the difference between a quote and a fragment.
+  excerpts_per_recording: 4
+  excerpt_context: 1
+  # Ranking. Term coverage dominates and everything else is a tie-break.
+  # Recency is deliberately weak: a client from March should not lose to last
+  # Tuesday's coffee on the grounds that Tuesday is nearer.
+  min_term_length: 3
+  recency_half_life_days: 30
+  recency_weight: 0.25
+  # A hit inside a stored analysis is worth more than one in raw speech,
+  # because the analyses are the curated read of the same conversation.
+  analysis_weight: 0.5
+  # A "quoted phrase" in the question triggers an exact-substring pass through
+  # the same search that `search --content` uses, and recordings it finds are
+  # promoted by this much. It costs a second pass over the archive, so it only
+  # runs when the question actually contains quotes.
+  phrase_bonus: 2.0
+  # Output ceiling for the answer itself. An answer is a paragraph and a few
+  # citations; a large number here buys latency and nothing else.
+  max_tokens: 2000

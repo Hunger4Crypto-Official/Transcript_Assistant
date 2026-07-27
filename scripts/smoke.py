@@ -203,6 +203,23 @@ def _routing_reply(user: str) -> dict[str, Any]:
     }
 
 
+def _ask_reply(_user: str) -> dict[str, Any]:
+    """
+    Answer the question route in the shape its output contract asks for.
+
+    The citation list is left empty on purpose. A citation naming a recording
+    that was not in the excerpts is dropped by `ask` and turns into a caveat on
+    the answer, so a stub that invented one would be manufacturing the very
+    warning the suite would then be reading.
+    """
+    return {
+        "answer": "The smoke fixture answers this question.",
+        "citations": [],
+        "confidence": "medium",
+        "unanswered": "",
+    }
+
+
 def _extraction_reply(user: str) -> dict[str, Any]:
     """
     Answer in the shape the profile's own schema asked for.
@@ -266,7 +283,15 @@ class _StubHandler(BaseHTTPRequestHandler):
             for m in request.get("messages", [])
             if m.get("role") == "user"
         )
-        payload = _routing_reply(user) if '"scores"' in user else _extraction_reply(user)
+        # Three prompts reach this endpoint and each wants a different shape:
+        # the router asks for scores, `ask` asks for an answer with citations,
+        # and extraction asks for the profile's own schema.
+        if '"scores"' in user:
+            payload = _routing_reply(user)
+        elif user.startswith("QUESTION:") and "EXCERPTS:" in user:
+            payload = _ask_reply(user)
+        else:
+            payload = _extraction_reply(user)
         body = json.dumps({
             "id": "smoke",
             "choices": [{"index": 0, "message": {"role": "assistant",
@@ -470,6 +495,18 @@ ROUTES: dict[str, list[Check]] = {
         c("open", "rec_does_not_exist", expect=(1,)),
     ],
     "verify": [c("verify", contains="artifact(s) indexed", quick=True)],
+    # `ask` exits 2 for the same reason `search --content` does: an answer that
+    # could not see everything is incomplete, and the quarantined fixture is
+    # permanently one of the things it cannot open.
+    "ask": [
+        c("ask", "what did I promise Dana?", expect=(0, 2), quick=True),
+        c("ask", "what did I promise Dana?", "--profile", "insurance_agent", expect=(0, 2)),
+        c("ask", "what is outstanding?", "--days", "30", "--limit", "5", expect=(0, 2)),
+        c("ask", "what did we agree at home?", "--include-personal", expect=(0, 2)),
+        c("ask", "what did I promise Dana?", "--local-only", expect=(0, 2)),
+        c("ask", "what did I promise Dana?", "--save", contains="saved, encrypted",
+          expect=(0, 2)),
+    ],
     # Exit 2 means "some recordings were omitted because they would not open".
     # A quarantined recording produces it permanently: the gate refuses to write
     # its content anywhere, so `Archive.full_record` sees withheld content with
@@ -500,6 +537,28 @@ ROUTES: dict[str, list[Check]] = {
         c("audit", "--recording-id", "{rec}"),
         c("audit", "--days", "7", "--limit", "5"),
         c("audit", "--out", "{out}/audit.csv", creates="{out}/audit.csv"),
+    ],
+    "followups": [
+        c("followups", quick=True),
+        c("followups", "--status", "all"),
+        c("followups", "--status", "done"),
+        c("followups", "--status", "dropped"),
+        c("followups", "--profile", "insurance_agent"),
+        c("followups", "--days", "30"),
+        c("followups", "--include-personal"),
+        c("followups", "--title", "Open Items"),
+        c("followups", "--out", "{out}/followups.md", creates="{out}/followups.md"),
+        c("followups", "--format", "html", "--out", "{out}/followups.html",
+          creates="{out}/followups.html"),
+        # A draft is written, never sent. All three ways of naming what to draft
+        # are exercised: everything open, one recording's debts, and one item.
+        c("followups", "--draft", "open", contains="wrote"),
+        c("followups", "--draft", "{rec}", contains="wrote"),
+        c("followups", "--draft", "{followup}", "--format", "text", contains="wrote"),
+        c("followups", "--done", "{followup}", contains="is now done"),
+        c("followups", "--reopen", "{followup}", contains="is now open"),
+        c("followups", "--drop", "{followup}", contains="is now dropped"),
+        c("followups", "--done", "fu_000000000000", expect=(1,)),
     ],
     "review": [
         c("review", quick=True),
@@ -576,7 +635,7 @@ ROUTES: dict[str, list[Check]] = {
 # other route needs what it produces.
 ROUTE_ORDER = (
     "doctor", "run", "status", "profiles", "voices", "digest", "search", "open",
-    "verify", "export", "audit", "review", "speakers list", "speakers enroll",
+    "verify", "ask", "export", "audit", "followups", "review", "speakers list", "speakers enroll",
     "speakers identify", "speakers forget", "release", "watch", "new-profile",
     "retention", "forget",
 )
@@ -636,9 +695,8 @@ class RouteResult:
 
 
 class Runner:
-    def __init__(self, sandbox: Sandbox, verbose: bool = False) -> None:
+    def __init__(self, sandbox: Sandbox) -> None:
         self.sandbox = sandbox
-        self.verbose = verbose
         self.subs: dict[str, str] = {"out": str(sandbox.out_dir)}
 
     def invoke(self, argv: list[str], stdin: str = "") -> tuple[int, str]:
@@ -660,11 +718,12 @@ class Runner:
 
     def refresh_fixture_ids(self) -> None:
         """
-        Find the recordings the later routes need, by reading the index.
+        Find the identifiers the later routes need.
 
-        Reading the database rather than scraping stdout is deliberate: the ids
-        are an implementation detail of the run, and a suite that parses its own
-        subject's output starts failing when the output is reworded.
+        Recording ids come from the index rather than from stdout, because they
+        are an implementation detail of the run and a suite that parses its own
+        subject's prose starts failing when the prose is reworded. The follow-up
+        id below is the exception, and it earns it.
         """
         db = Database(self.sandbox.root / "data" / "bridge.db")
         try:
@@ -684,6 +743,14 @@ class Runner:
         doomed = spare or work
         if doomed:
             self.subs["doomed"] = doomed[-1]["id"]
+
+        # A follow-up id is not in the index. It is derived from the analyses
+        # and printed by the route itself, beside the command that consumes it,
+        # so reading one back out of that output is exactly what a person does.
+        _code, output = self.invoke(["followups"])
+        found = re.search(r"--done\s+(fu_[0-9a-f]+)", output)
+        if found:
+            self.subs["followup"] = found.group(1)
 
     def render(self, value: str) -> str | None:
         try:
@@ -748,7 +815,7 @@ def select_checks(checks: list[Check], quick: bool) -> list[Check]:
 
 def run_suite(sandbox: Sandbox, only: str = "", quick: bool = False,
               verbose: bool = False) -> tuple[list[RouteResult], list[str]]:
-    runner = Runner(sandbox, verbose=verbose)
+    runner = Runner(sandbox)
     declared = parser_routes()
     uncovered = [name for name in declared if name not in ROUTES]
 

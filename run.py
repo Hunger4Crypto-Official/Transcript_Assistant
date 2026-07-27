@@ -11,6 +11,7 @@ Plaud Bridge, without installing anything.
     python run.py followups                     commitments still open, oldest first
     python run.py status                        index summary
     python run.py search "own occupation" --content    search what was actually said
+    python run.py ask "what did I promise Marcus?"     answer it, with citations
     python run.py open <recording_id>           decrypt and print an artifact
     python run.py verify                        confirm every artifact still opens
     python run.py export                        redacted document for someone else

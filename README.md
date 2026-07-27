@@ -77,6 +77,7 @@ Other commands:
 | `run.py watch` | Process the inbox on an interval until you stop it |
 | `run.py search "elimination period"` | Find recordings by filename |
 | `run.py search "own occupation" --content` | **Search what was actually said** |
+| `run.py ask "what did I promise the Hendersons?"` | **Answer a question, with citations** |
 | `run.py verify` | Confirm every artifact still exists and still decrypts |
 | `run.py export --days 30` | Build a redacted document for someone else |
 | `run.py forget <id>` | Permanently delete one recording |

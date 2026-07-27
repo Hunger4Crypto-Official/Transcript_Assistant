@@ -29,7 +29,7 @@ from plaud_bridge.db import Database
 COVERED = {
     "doctor", "run", "watch", "digest", "status", "search", "verify", "forget",
     "export", "open", "audit", "release", "retention", "profiles",
-    "new-profile", "voices", "review", "speakers", "followups",
+    "new-profile", "voices", "review", "speakers", "followups", "ask",
 }
 
 
@@ -71,6 +71,10 @@ READ_ONLY = [
     ("profiles",),
     ("voices",),
     ("speakers", "list"),
+    ("ask", "what did I promise about the quotes?"),
+    ("ask", "elimination period", "--profile", "insurance_agent"),
+    ("ask", "anything at all", "--include-personal", "--days", "30"),
+    ("ask", "anything at all", "--local-only"),
     ("followups",),
     ("followups", "--status", "all"),
     ("followups", "--format", "html"),
@@ -112,6 +116,11 @@ def _acceptable(argv) -> set[int]:
     if argv[0] == "doctor":
         return {0, 1}
     if "--scan-limit" in argv:
+        return {0, 2}
+    # `ask` reports 2 when the answer is incomplete -- a bounded scan, a
+    # trimmed context, a dropped citation. That is an answer with a caveat,
+    # not a crash, and the caveat is the part worth exiting non-zero for.
+    if argv[0] == "ask":
         return {0, 2}
     return {0}
 

@@ -11,6 +11,7 @@ Plaud Bridge command line.
     plaud-bridge followups                     commitments still open, oldest first
     plaud-bridge status                        index summary
     plaud-bridge search "own occupation" --content    search what was actually said
+    plaud-bridge ask "what did I promise Marcus?"      answer it, with citations
     plaud-bridge open <recording_id>           decrypt and print an artifact
     plaud-bridge verify                        confirm every artifact still opens
     plaud-bridge export                        redacted document for someone else
@@ -37,6 +38,7 @@ from pathlib import Path
 
 from . import __version__
 from .archive import Archive
+from .ask import ask, save_answer
 from .compliance import RetentionSweeper
 from .config import Config, ConfigError
 from .db import Database
@@ -159,6 +161,12 @@ def cmd_doctor(args) -> int:
         "ready" if local_llm_ok
         else "not configured. father/husband analysis will fail by design, not by accident. "
              "Enable llm.local in pipeline.yaml.",
+    ))
+    rows.append((
+        OK if any_llm else WARN, "ask",
+        "ready" if any_llm else
+        "no usable LLM: `ask` returns ranked excerpts instead of answers, which "
+        "still beats `search --content` but is not an answer",
     ))
 
     # offline readiness
@@ -490,6 +498,51 @@ def _search_content(cfg, db, args) -> int:
             print(f"  ... and {len(unopened) - 20} more")
         print("  Set PLAUD_BRIDGE_PASSPHRASE if these are encrypted.\n")
     return 0 if result.complete else 2
+
+
+def cmd_ask(args) -> int:
+    """
+    Answer a question from what was actually said, with citations.
+
+    Exits 2 when the answer is incomplete -- a recording would not open, the
+    scan was bounded, the context budget cut material, or a citation had to be
+    dropped. Same reasoning as `search --content`: an answer you would read
+    differently having seen the caveat should not look like a clean run to
+    whatever called it.
+    """
+    cfg = _load(args)
+    db = Database(cfg.path("database"))
+    try:
+        answer = ask(
+            args.question, cfg, db, Archive(cfg, db),
+            profile=args.profile,
+            days=args.days,
+            limit=args.limit,
+            include_personal=args.include_personal,
+            local_only=True if args.local_only else None,
+        )
+        print()
+        print(answer.render())
+        print()
+
+        if args.save:
+            try:
+                print(f"saved, encrypted: {save_answer(answer, cfg)}\n")
+            except VaultError as exc:
+                # The answer has already been printed, so nothing is lost by
+                # refusing to write it. Saying so and failing is the point: a
+                # silent non-write is how you discover months later that
+                # nothing was ever kept.
+                print(f"NOT saved: {exc}\n")
+                return 1
+
+        incomplete = bool(
+            answer.degraded or answer.unopened or answer.dropped_citations
+            or answer.truncated
+        )
+        return 2 if incomplete else 0
+    finally:
+        db.close()
 
 
 def cmd_verify(args) -> int:
@@ -1347,6 +1400,21 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--days", type=int, default=None)
     p.add_argument("--limit", type=int, default=50)
     p.set_defaults(func=cmd_search)
+
+    p = sub.add_parser("ask", help="answer a question from what was actually said")
+    p.add_argument("question", help='e.g. "what did I promise the Hendersons?"')
+    p.add_argument("--profile", default=None, help="restrict to one profile id")
+    p.add_argument("--days", type=int, default=None,
+                   help="lookback window (default: ask.days; 0 searches everything)")
+    p.add_argument("--limit", type=int, default=None,
+                   help="how many recordings may contribute to one answer")
+    p.add_argument("--include-personal", action="store_true",
+                   help="search father/husband too; they are left out by default")
+    p.add_argument("--local-only", action="store_true",
+                   help="force local processing even where every profile permits cloud")
+    p.add_argument("--save", action="store_true",
+                   help="keep the answer in the vault, encrypted")
+    p.set_defaults(func=cmd_ask)
 
     p = sub.add_parser("verify", help="check every artifact still exists and still opens")
     p.set_defaults(func=cmd_verify)
