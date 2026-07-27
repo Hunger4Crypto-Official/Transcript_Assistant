@@ -1,6 +1,40 @@
 # Changelog
 
-## Unreleased — day-length recordings
+## Unreleased — named speakers
+
+### Speakers have names now, or they stay numbered
+
+Diarization could tell three people apart but had never heard any of them
+before, so the best it could write was `Speaker 2`.
+
+- `speakers enroll "Marcus" --audio clip.wav` learns a voice. `--start/--end`
+  trim to a clean stretch; a second clip from a different room improves it.
+- `speakers identify <audio>` prints every cluster, its length, and its
+  similarity to everyone enrolled, and writes nothing. It is how you pick a
+  threshold for your own microphone instead of trusting a default.
+- `speakers list` and `speakers forget` complete the set. `doctor` reports the
+  embedding model and who is enrolled.
+- Enrolling yourself beats `assume_owner_is_dominant_speaker`, which is a guess
+  that is usually right and occasionally embarrassing.
+
+### It would rather say nothing than guess
+
+A name is believed in a way `Speaker 2` is not, so two guards stand between a
+similarity score and a transcript: an absolute threshold, and a margin over the
+runner-up. Two brothers at 0.61 and 0.60 is a tie, not an identification, and
+both stay numbered. A person is used at most once per recording. See ADR-022.
+
+### Voiceprints are encrypted or they are not stored
+
+Enrollment requires a working vault passphrase, with no plaintext fallback and
+no flag to ask for one. A voiceprint is biometric data about people who did not
+install this software; a plaintext copy of it is a biometric database in a user
+directory. See ADR-023.
+
+Nothing is uploaded — the embedding model runs locally like everything else.
+`scripts/fetch_models.py --embedding` collects it for an air-gapped machine.
+
+## Previously — day-length recordings
 
 ### Episodes: a day becomes a rundown per profile
 

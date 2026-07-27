@@ -94,6 +94,10 @@ Other commands:
 | `run.py profiles` | Show the routing table |
 | `run.py new-profile <id>` | Scaffold a new profile from the template |
 | `run.py voices` | Show the installed voice packs |
+| `run.py speakers list` | Who this archive can recognise by name |
+| `run.py speakers enroll "Marcus" --audio clip.wav` | **Teach it a voice** |
+| `run.py speakers identify <audio>` | Score a recording, change nothing |
+| `run.py speakers forget "Marcus"` | Delete a voiceprint permanently |
 
 `pip install -e .` installs the same commands as `plaud-bridge`, if you would
 rather not type `python run.py` from the project directory.
@@ -170,6 +174,80 @@ router has nothing to go on and the profile will never match anything.
 
 Files starting with an underscore are ignored by the loader, so the template
 itself never becomes a profile.
+
+---
+
+## Named speakers
+
+Diarization can tell three people apart. It has never heard any of them before,
+so on its own the best it can write is `Speaker 2`. Enroll someone once and
+their turns come back with their name on them.
+
+```bash
+# One clip of one person talking, thirty seconds is plenty
+python run.py speakers enroll "Marcus" --audio clips/marcus.wav
+
+# Trim to a clean stretch if the clip has other voices in it
+python run.py speakers enroll "Dana" --audio meeting.m4a --start 42 --end 96
+
+# A second clip from a different room makes matching more reliable
+python run.py speakers enroll "Marcus" --audio clips/marcus-car.wav
+
+python run.py speakers list
+python run.py speakers forget "Marcus"
+```
+
+Before trusting it on real recordings, see what it actually thinks:
+
+```bash
+python run.py speakers identify data/inbox/2026-07-14.mp3
+```
+
+That prints every cluster, how long it spoke, and its similarity to everyone
+enrolled. It writes nothing. It is the only sane way to pick a threshold for
+your own voice, your own room, and your own microphone.
+
+Enroll yourself too. `diarization.owner_label` guesses that the most-present
+voice is the wearer, which is usually right and occasionally embarrassing; an
+enrolled voiceprint beats the guess.
+
+### It would rather say nothing than guess
+
+Two guards stand between a similarity score and a name on a transcript:
+
+- **Threshold.** The score has to clear `diarization.identify.threshold`
+  outright. Nobody in the room being enrolled is the normal case, and the
+  nearest of five strangers is still a stranger.
+- **Margin.** The best match has to beat the runner-up by
+  `diarization.identify.margin`. Relatives sound alike. Two brothers at 0.61 and
+  0.60 means the model cannot tell them apart on this audio, which is a reason
+  to stay quiet rather than flip a coin.
+
+Anyone unmatched stays `Speaker 2`. A wrong name is worse than no name, because
+a name is believed — it gets read six months later as fact, quoted into a
+follow-up, and acted on. Silence about who spoke is recoverable.
+
+A person is also used at most once per recording. The same voice cannot be two
+people in the same room, so the higher score keeps the name.
+
+### Where voiceprints live
+
+In the vault, encrypted under your passphrase, as `voiceprints.enc`. There is no
+plaintext fallback and no flag to ask for one: a voiceprint is biometric data
+about someone who usually is not you, and a plaintext copy of it is a biometric
+database sitting in a user directory. Enrollment without a working passphrase
+refuses rather than degrading.
+
+Nothing is uploaded. The embedding model runs locally, exactly like diarization.
+For an air-gapped machine, fetch it with the rest:
+
+```bash
+python scripts/fetch_models.py --embedding      # or --all
+```
+
+`speakers forget` deletes the voiceprint. Transcripts already written keep the
+name they were given, because rewriting history is not this tool's job — the
+audit log and the archive are meant to be stable.
 
 ---
 

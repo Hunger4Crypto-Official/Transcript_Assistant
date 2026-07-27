@@ -29,7 +29,7 @@ from plaud_bridge.db import Database
 COVERED = {
     "doctor", "run", "watch", "digest", "status", "search", "verify", "forget",
     "export", "open", "audit", "release", "retention", "profiles",
-    "new-profile", "voices", "review",
+    "new-profile", "voices", "review", "speakers",
 }
 
 
@@ -70,6 +70,7 @@ READ_ONLY = [
     ("status",),
     ("profiles",),
     ("voices",),
+    ("speakers", "list"),
     ("verify",),
     ("review",),
     ("review", "--days", "7"),
@@ -462,6 +463,10 @@ def _fetch_models():
 @pytest.mark.parametrize("subdir,name", [
     ("whisper", "large-v3"),
     ("diarization", "pyannote/speaker-diarization-3.1"),
+    # Named speakers put a second model in the diarization directory. If the
+    # fetcher and the runtime ever disagree about the layout, the failure is an
+    # air-gapped machine being told to download something.
+    ("diarization", "pyannote/embedding"),
 ])
 def test_the_fetcher_writes_where_the_runtime_looks(tmp_path, monkeypatch, subdir, name):
     fetch_models = _fetch_models()

@@ -13,7 +13,8 @@ network, then carry the result across.
 What it collects:
 
   models/whisper/<name>/          speech recognition weights (faster-whisper)
-  models/diarization/<name>/      speaker separation weights (pyannote)
+  models/diarization/<name>/      speaker separation weights (pyannote), and the
+                                  speaker embedding model that puts names on them
   wheels/                         every Python dependency, as wheels
 
 The diarization model needs a HuggingFace token AND acceptance of the model
@@ -36,6 +37,10 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_WHISPER = "large-v3"
 DEFAULT_DIARIZATION = "pyannote/speaker-diarization-3.1"
+# Embeddings share the diarization directory because they share a subdir in
+# runtime.resolve_local_model, and one folder to copy across is one folder to
+# forget to copy across.
+DEFAULT_EMBEDDING = "pyannote/embedding"
 
 
 def _flat(name: str) -> str:
@@ -63,15 +68,16 @@ def fetch_whisper(name: str, models_dir: Path) -> int:
     return 0
 
 
-def fetch_diarization(name: str, models_dir: Path, token: str | None) -> int:
+def fetch_diarization(name: str, models_dir: Path, token: str | None,
+                      what: str = "speaker separation") -> int:
     dest = models_dir / "diarization" / _flat(name)
-    print(f"\n== speaker separation: {name}\n   -> {dest}")
+    print(f"\n== {what}: {name}\n   -> {dest}")
     if not token:
         print("   no HUGGINGFACE_TOKEN set, and this model needs one to download.")
         print("   1. create a token at huggingface.co/settings/tokens")
         print(f"   2. accept the licence at huggingface.co/{name}")
         print("   3. export HUGGINGFACE_TOKEN=hf_... and run this again")
-        print("   Skipping. Speaker separation will be unavailable offline.")
+        print(f"   Skipping. {what.capitalize()} will be unavailable offline.")
         return 1
 
     try:
@@ -118,6 +124,10 @@ def build_parser() -> argparse.ArgumentParser:
                     metavar="NAME", help=f"speech recognition weights (default {DEFAULT_WHISPER})")
     ap.add_argument("--diarization", nargs="?", const=DEFAULT_DIARIZATION, default=None,
                     metavar="NAME", help="speaker separation weights")
+    ap.add_argument("--embedding", nargs="?", const=DEFAULT_EMBEDDING, default=None,
+                    metavar="NAME",
+                    help=f"speaker embedding weights for named speakers "
+                         f"(default {DEFAULT_EMBEDDING})")
     ap.add_argument("--wheels", action="store_true", help="download every dependency as a wheel")
     ap.add_argument("--extras", default="local-asr,diarize",
                     help="optional dependency groups to include in the wheel set")
@@ -130,7 +140,7 @@ def main(argv: list[str] | None = None) -> int:
     ap = build_parser()
     args = ap.parse_args(argv)
 
-    if not any([args.all, args.whisper, args.diarization, args.wheels]):
+    if not any([args.all, args.whisper, args.diarization, args.embedding, args.wheels]):
         ap.print_help()
         return 1
 
@@ -143,6 +153,12 @@ def main(argv: list[str] | None = None) -> int:
         failures += fetch_diarization(
             args.diarization or DEFAULT_DIARIZATION, models_dir,
             os.environ.get("HUGGINGFACE_TOKEN", "").strip() or None,
+        )
+    if args.all or args.embedding:
+        failures += fetch_diarization(
+            args.embedding or DEFAULT_EMBEDDING, models_dir,
+            os.environ.get("HUGGINGFACE_TOKEN", "").strip() or None,
+            what="speaker embedding",
         )
     if args.all or args.wheels:
         failures += fetch_wheels(

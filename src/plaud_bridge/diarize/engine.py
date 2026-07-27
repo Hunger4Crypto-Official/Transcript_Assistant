@@ -22,6 +22,7 @@ from pathlib import Path
 from ..logging_setup import get
 from ..models import Segment
 from ..runtime import is_offline, resolve_local_model
+from .voiceprint import named_speakers
 
 log = get("diarize")
 
@@ -97,6 +98,35 @@ def _dominant_speaker(segments: list[Segment]) -> str | None:
     return max(totals, key=totals.get) if totals else None
 
 
+def speaker_turns(audio_path: Path, cfg) -> list[Segment]:
+    """
+    Who spoke when, with no transcript involved.
+
+    `speakers identify` needs the clusters but not the words: it is answering
+    "is one of these voices Marcus", and transcribing an enrollment clip to find
+    out would mean loading Whisper for nothing. The segments come back with
+    empty text, which is exactly what the identification path reads.
+    """
+    ok, why = _available(cfg)
+    if not ok:
+        raise DiarizationError(why)
+
+    pipe = _load_pipeline(cfg)
+    kwargs = {}
+    min_s = cfg.get("diarization.min_speakers")
+    max_s = cfg.get("diarization.max_speakers")
+    if min_s:
+        kwargs["min_speakers"] = int(min_s)
+    if max_s:
+        kwargs["max_speakers"] = int(max_s)
+
+    annotation = pipe(str(audio_path), **kwargs)
+    return [
+        Segment(start=turn.start, end=turn.end, text="", speaker=str(label))
+        for turn, _, label in annotation.itertracks(yield_label=True)
+    ]
+
+
 def diarize(audio_path: Path, segments: list[Segment], cfg) -> list[Segment]:
     """
     Assign a speaker label to every transcript segment.
@@ -146,20 +176,40 @@ def diarize(audio_path: Path, segments: list[Segment], cfg) -> list[Segment]:
                 best_label, best_overlap = label, overlap
         seg.speaker = best_label
 
+    # Put names on the clusters we recognise. This runs before the owner and
+    # "Speaker N" fallbacks below so that a person who has been enrolled keeps
+    # their name even when they are the one doing most of the talking.
+    try:
+        mapping: dict[str, str] = dict(named_speakers(audio_path, segments, cfg))
+    except Exception as exc:  # noqa: BLE001
+        # Recognising nobody is a worse transcript, not a broken one.
+        log.warning("speaker identification failed, continuing unnamed: %s", exc)
+        mapping = {}
+
     # The device sits on your body, so the most-present voice is almost always
     # the wearer. Relabel for readability.
     if cfg.get("diarization.assume_owner_is_dominant_speaker", True):
         owner = cfg.get("diarization.owner_label", "Owner")
         dominant = _dominant_speaker(segments)
-        if dominant:
-            counter = 1
-            mapping: dict[str, str] = {dominant: owner}
-            for seg in segments:
-                if seg.speaker not in mapping:
-                    mapping[seg.speaker] = f"Speaker {counter}"
-                    counter += 1
-            for seg in segments:
-                seg.speaker = mapping[seg.speaker]
+        # If the wearer is enrolled under their own name, that name already won
+        # above and applying the owner label on top would rename them twice.
+        if dominant and dominant not in mapping and owner not in mapping.values():
+            mapping[dominant] = owner
+        used = set(mapping.values())
+        counter = 1
+        for seg in segments:
+            if seg.speaker in mapping:
+                continue
+            while f"Speaker {counter}" in used:
+                counter += 1
+            mapping[seg.speaker] = f"Speaker {counter}"
+            used.add(f"Speaker {counter}")
+
+    # Clusters nobody recognised and no rule renamed keep the label diarization
+    # gave them, which is what this did before any of the naming existed.
+    if mapping:
+        for seg in segments:
+            seg.speaker = mapping.get(seg.speaker, seg.speaker)
 
     log.info("diarized into %d speakers", len({s.speaker for s in segments}))
     return segments

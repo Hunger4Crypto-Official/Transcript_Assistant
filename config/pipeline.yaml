@@ -109,6 +109,35 @@ diarization:
   assume_owner_is_dominant_speaker: true
   owner_label: "Sasson"
 
+  # ---------------------------------------------------------------------
+  # Named speakers. Diarization can tell three people apart but has never
+  # heard any of them before, so "Speaker 2" is the best it can do alone.
+  # Enroll someone once and their cluster comes back with their name:
+  #
+  #   python run.py speakers enroll "Marcus" --audio clips/marcus.wav
+  #   python run.py speakers identify data/inbox/2026-07-14.mp3
+  #
+  # Voiceprints are stored encrypted in the vault and never leave the machine.
+  # ---------------------------------------------------------------------
+  identify:
+    enabled: true
+    # Local, like everything else here. Needs a HuggingFace token the first
+    # time only, or fetch it ahead with scripts/fetch_models.py --embedding.
+    model: "pyannote/embedding"
+    # Cosine similarity a cluster must reach before it gets a name at all.
+    # Raise it if you see wrong names; lower it if people go unrecognised.
+    # `speakers identify` prints the actual scores, which is the only sane
+    # way to pick this number for your own recordings and your own room.
+    threshold: 0.55
+    # And it must beat the runner-up by this much. Two brothers scoring 0.61
+    # and 0.60 means the model cannot tell them apart on this audio, and a
+    # coin flip would put a wrong name on a transcript somebody will believe.
+    margin: 0.08
+    # Clusters with less speech than this are not guessed at.
+    min_speech_seconds: 3.0
+    # How many of a cluster's longest spans to average into one vector.
+    max_crops: 8
+
 llm:
   # Token rates below are what feed cost.halt_usd_per_run. They are a guardrail,
   # not an invoice: they are read from the usage each provider reports, and a

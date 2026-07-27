@@ -20,6 +20,7 @@ Plaud Bridge, without installing anything.
     python run.py profiles                      show the routing table
     python run.py new-profile <id>              scaffold a profile from the template
     python run.py voices                        show installed voice packs
+    python run.py speakers list                 who this archive can name
 
 The commands live in `src/plaud_bridge/cli.py`. This shim exists so the tool
 works straight out of a `git clone` with nothing installed but PyYAML and

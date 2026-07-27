@@ -20,6 +20,8 @@ Plaud Bridge command line.
     plaud-bridge profiles                      show the routing table
     plaud-bridge new-profile <id>              scaffold a profile from the template
     plaud-bridge voices                        show installed voice packs
+    plaud-bridge speakers enroll "Marcus" --audio clip.wav   teach it a voice
+    plaud-bridge speakers identify <audio>     score a recording without writing anything
 
 `python run.py <command>` runs the same code without installing anything.
 """
@@ -118,6 +120,23 @@ def cmd_doctor(args) -> int:
     ok, why = diar_available(cfg)
     rows.append((OK if ok else WARN, "diarization", why if ok else why + " (speaker labels off)"))
 
+    # named speakers
+    from .diarize.voiceprint import Embedder, VoiceprintError, VoiceprintStore
+
+    ok, why = Embedder.available(cfg)
+    rows.append((OK if ok else WARN, "speakers:model",
+                 why if ok else why + " (speakers stay numbered)"))
+    try:
+        enrolled = VoiceprintStore(Vault(cfg.path("vault"))).people()
+        rows.append((
+            OK if enrolled else WARN, "speakers:enrolled",
+            ", ".join(p.name for p in enrolled) if enrolled
+            else 'nobody enrolled yet (run.py speakers enroll "Name" --audio clip.wav)',
+        ))
+    except (VoiceprintError, VaultError) as exc:
+        rows.append((BAD, "speakers:enrolled", str(exc).splitlines()[0]))
+        fatal = True
+
     # LLM
     from .llm.registry import build_llm_chain
 
@@ -159,6 +178,7 @@ def cmd_doctor(args) -> int:
         for label, configured, subdir in (
             ("asr", cfg.get("asr.local.model", "large-v3"), "whisper"),
             ("diarization", cfg.get("diarization.pyannote.model", ""), "diarization"),
+            ("speakers", cfg.get("diarization.identify.model", ""), "diarization"),
         ):
             if not configured:
                 continue
@@ -856,6 +876,171 @@ def cmd_voices(args) -> int:
     return 0
 
 
+def _speakers_store(cfg):
+    from .diarize.voiceprint import VoiceprintStore
+
+    return VoiceprintStore(Vault(cfg.path("vault")))
+
+
+def _prepared_audio(cfg, src: Path, work_dir: Path) -> Path:
+    """
+    Enrollment and identification want the same 16k mono wav the pipeline uses.
+
+    An enrollment clip recorded on a phone and a recording exported from the
+    device should produce comparable vectors, and they will not if one of them
+    is a 44.1k stereo mp3.
+    """
+    from .audio import AudioPreparer
+
+    normalised, _duration = AudioPreparer(cfg).normalise(src, work_dir)
+    return normalised
+
+
+def cmd_speakers(args) -> int:
+    """
+    Enroll, list, test, and forget the voices this archive can name.
+
+    Split into sub-commands because these are four genuinely different verbs
+    with different consequences, and `speakers forget` deleting a voiceprint
+    should not share a flag namespace with `speakers enroll` creating one.
+    """
+    cfg = _load(args)
+    cfg.ensure_dirs()
+    from .audio import AudioError
+    from .diarize.voiceprint import Embedder, VoiceprintError, identify
+
+    action = args.speakers_action
+    store = _speakers_store(cfg)
+
+    try:
+        # ---- list --------------------------------------------------------
+        if action == "list":
+            people = store.people()
+            if not people:
+                print("\nNobody is enrolled, so every speaker stays numbered.\n")
+                print('  run.py speakers enroll "Marcus" --audio clips/marcus.wav\n')
+                return 0
+            print(f"\n{len(people)} enrolled voice(s), encrypted in {store.path}\n")
+            for person in people:
+                sources = ", ".join(s.source for s in person.samples if s.source)
+                print(f"  {person.name:24s} {len(person.samples)} sample(s), "
+                      f"{person.seconds:.0f}s, updated {person.updated_at[:10]}")
+                if sources:
+                    print(f"  {'':24s} from {sources}")
+            print("\nThreshold and margin live under diarization.identify in pipeline.yaml.")
+            print("Run `speakers identify <audio>` to see the actual scores before changing them.\n")
+            return 0
+
+        # ---- forget ------------------------------------------------------
+        if action == "forget":
+            person = store.find(args.name)
+            if person is None:
+                print(f"nobody enrolled under '{args.name}'. Known: "
+                      f"{', '.join(p.name for p in store.people()) or 'nobody'}")
+                return 1
+            if not args.yes and not _confirm(
+                f"\nDelete the voiceprint for {person.name} "
+                f"({len(person.samples)} sample(s))?\nType the name to confirm: ",
+                person.name,
+            ):
+                return 1
+            store.forget(person.id)
+            store.save()
+            print(f"\n{person.name} is no longer recognised. Transcripts already written keep "
+                  "the name they were given; this only affects future recordings.\n")
+            return 0
+
+        # ---- enroll ------------------------------------------------------
+        if action == "enroll":
+            src = Path(args.audio)
+            if not src.exists():
+                print(f"no such file: {src}")
+                return 1
+            ok, why = Embedder.available(cfg)
+            if not ok:
+                print(f"\ncannot enroll: {why}\n")
+                return 1
+
+            work = cfg.path("work") / "enroll"
+            prepared = _prepared_audio(cfg, src, work)
+            span = ""
+            if args.start is not None or args.end is not None:
+                span = f" [{args.start or 0:.0f}s-{args.end:.0f}s]" if args.end else ""
+            print(f"\nembedding {src.name}{span} ...")
+
+            vector = Embedder(cfg).embed(prepared, args.start, args.end)
+            seconds = (args.end - (args.start or 0.0)) if args.end else 0.0
+            if not seconds:
+                from .audio import probe_duration
+
+                seconds = probe_duration(prepared, cfg.get("audio.ffprobe_binary", "ffprobe"))
+
+            person = store.enroll(args.name, vector, source=src.name, seconds=seconds,
+                                  replace=args.replace)
+            store.save()
+            _discard_scratch(work)
+            print(f"\n{person.name} enrolled from {seconds:.0f}s of speech "
+                  f"({len(person.samples)} sample(s) total).")
+            print("Add a second clip from a different room to make matching more reliable.\n")
+            return 0
+
+        # ---- identify ----------------------------------------------------
+        if action == "identify":
+            src = Path(args.audio)
+            if not src.exists():
+                print(f"no such file: {src}")
+                return 1
+            if store.is_empty():
+                print("\nNobody is enrolled, so there is nothing to compare against.\n")
+                return 1
+
+            from .diarize.engine import DiarizationError, speaker_turns
+
+            work = cfg.path("work") / "identify"
+            prepared = _prepared_audio(cfg, src, work)
+            try:
+                segments = speaker_turns(prepared, cfg)
+            except DiarizationError as exc:
+                print(f"\ncannot separate speakers: {exc}")
+                print("Without diarization this can only be scored as a single voice.\n")
+                segments = []
+            if not segments:
+                from .audio import probe_duration
+                from .models import Segment as _Segment
+
+                total = probe_duration(prepared, cfg.get("audio.ffprobe_binary", "ffprobe"))
+                segments = [_Segment(start=0.0, end=total, text="", speaker="WHOLE FILE")]
+
+            matches = identify(prepared, segments, cfg, store)
+            threshold = float(cfg.get("diarization.identify.threshold", 0.55))
+            print(f"\n{src.name}: {len(matches)} cluster(s), threshold {threshold:.2f}\n")
+            for match in matches:
+                verdict = match.matched or "unnamed"
+                print(f"  {match.cluster:14s} {match.seconds:6.1f}s  -> {verdict}")
+                for name, score in match.scores[:4]:
+                    marker = "*" if name == match.matched else " "
+                    print(f"  {'':14s} {marker} {name:22s} {score:.3f}")
+                if not match.matched:
+                    print(f"  {'':14s}   ({match.reason})")
+            _discard_scratch(work)
+            print("\nNothing was written. Adjust diarization.identify.threshold and margin "
+                  "in pipeline.yaml if these scores disagree with your ears.\n")
+            return 0
+
+    except (VoiceprintError, VaultError, AudioError) as exc:
+        print(f"\n{exc}\n", file=sys.stderr)
+        return 1
+
+    return 1
+
+
+def _discard_scratch(work_dir: Path) -> None:
+    """An enrollment clip is somebody's voice; the scratch copy does not linger."""
+    from .audio import AudioPreparer
+
+    AudioPreparer.cleanup(work_dir)
+
+
 def cmd_review(args) -> int:
     """
     The review cadence from COMPLIANCE.md section 9, as a command.
@@ -1135,6 +1320,33 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("voices", help="show installed voice packs")
     p.set_defaults(func=cmd_voices)
+
+    p = sub.add_parser("speakers", help="teach it who is who, so transcripts use names")
+    p.set_defaults(func=cmd_speakers)
+    speakers = p.add_subparsers(dest="speakers_action", required=True)
+
+    sp = speakers.add_parser("list", help="who this archive can recognise")
+    sp.set_defaults(func=cmd_speakers)
+
+    sp = speakers.add_parser("enroll", help="learn a voice from a clip of one person talking")
+    sp.add_argument("name", help='display name, e.g. "Marcus"')
+    sp.add_argument("--audio", required=True, help="a clip of this person and nobody else")
+    sp.add_argument("--start", type=float, default=None,
+                    help="seconds into the file to start (use when the clip is not clean)")
+    sp.add_argument("--end", type=float, default=None, help="seconds into the file to stop")
+    sp.add_argument("--replace", action="store_true",
+                    help="discard this person's existing samples instead of adding to them")
+    sp.set_defaults(func=cmd_speakers)
+
+    sp = speakers.add_parser("identify",
+                             help="score a recording against the enrolled voices, changing nothing")
+    sp.add_argument("audio")
+    sp.set_defaults(func=cmd_speakers)
+
+    sp = speakers.add_parser("forget", help="delete a voiceprint permanently")
+    sp.add_argument("name")
+    sp.add_argument("--yes", action="store_true", help="skip the confirmation prompt")
+    sp.set_defaults(func=cmd_speakers)
 
     p = sub.add_parser("review", help="the COMPLIANCE.md review cadence, assembled")
     p.add_argument("--days", type=int, default=30, help="lookback window (default 30)")

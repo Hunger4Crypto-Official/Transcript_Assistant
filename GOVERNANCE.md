@@ -396,6 +396,46 @@ worse than one with no search at all, because you believe it.
 
 ---
 
+## ADR-022: A speaker is named only when the model is not close to wrong
+
+**Decision.** Identification puts a name on a diarized cluster only when the
+similarity clears an absolute threshold AND beats the runner-up by a margin. A
+person is used at most once per recording. Everything else stays `Speaker N`.
+
+**Why.** A name is believed. `Speaker 2` is read as a placeholder and checked
+against memory; "Marcus" is read as fact, quoted into a follow-up, and acted on
+six months later by someone who was not in the room. The two failure modes are
+not symmetric, so the guards are not symmetric either.
+
+The margin exists because the nearest-neighbour framing is misleading on the
+recordings this tool is actually for. Family members sound alike. So do a father
+and a son on a phone speaker. When two enrolled people score 0.61 and 0.60, the
+model has not identified anybody; it has produced a tie and a rounding error.
+
+The one-name-per-recording rule follows from the same reasoning: a single voice
+cannot be two people in one room, so if two clusters both want the same name,
+at most one of them can be right.
+
+---
+
+## ADR-023: Voiceprints are encrypted or they are not stored
+
+**Decision.** Enrollment requires a working vault passphrase. There is no
+plaintext fallback, no `--force`, and no config key to ask for one. Without a
+passphrase, `speakers enroll` refuses.
+
+**Why.** Everywhere else in this project, an unavailable vault degrades to
+"process the low-sensitivity profiles only". That reasoning does not transfer.
+A voiceprint is biometric data about people who did not install this software
+and mostly do not know it exists — clients, kids, a spouse. A plaintext
+`voiceprints.json` is a biometric database in a user directory, backed up to
+wherever that directory syncs.
+
+The consistent choice with ADR-019 is that the unsafe option is the one that
+does not ship at all.
+
+---
+
 ## Known limitations
 
 1. **Crosstalk breaks diarization.** When two people talk over each other,
@@ -429,6 +469,17 @@ worse than one with no search at all, because you believe it.
 
 7. **This runs on one machine.** No multi-device sync, no server. That is a
    deliberate scope boundary, not an oversight.
+
+8. **Speaker identification degrades with the room, not gracefully.** A
+   voiceprint enrolled from a quiet clip matches poorly against a car, a
+   restaurant, or a phone speaker. Enroll two or three clips from the places you
+   actually record. The default threshold is a starting point, not a
+   calibration: run `speakers identify` on your own audio and read the scores
+   before trusting any of it.
+
+9. **Crosstalk defeats identification the same way it defeats diarization.** A
+   cluster containing two overlapping voices embeds to something that is neither
+   of them, which the margin guard will usually reject. Usually.
 
 ---
 
