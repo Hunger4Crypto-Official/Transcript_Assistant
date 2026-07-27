@@ -16,6 +16,7 @@ Plaud Bridge command line.
     plaud-bridge verify                        confirm every artifact still opens
     plaud-bridge export                        redacted document for someone else
     plaud-bridge forget <recording_id>         delete one recording, permanently
+    plaud-bridge memory                        what it has learned across recordings
     plaud-bridge audit                         read the compliance audit log
     plaud-bridge release <recording_id>        release a quarantined recording
     plaud-bridge retention --execute           delete expired artifacts
@@ -45,6 +46,7 @@ from .db import Database
 from .digest import DigestBuilder, DigestOptions, fmt_value, to_html
 from .followups import FollowUpError, collect, draft, render, set_status
 from .logging_setup import setup
+from .memory import MemoryStore, carry_forward_brief, render_ledger
 from .models import format_stamp
 from .pipeline import Pipeline
 from .storage import Vault, VaultError
@@ -589,7 +591,16 @@ def cmd_forget(args) -> int:
         print(f"\ndeleted {removed} file(s) and the index entry")
         for failure in failures:
             print(f"  could not delete {failure}")
-        return 1 if failures else 0
+
+        # A ledger that still remembers a deleted recording, and feeds it into
+        # the next prompt, would make this command's promise false.
+        store = MemoryStore(cfg)
+        forgotten = store.forget_recording(args.recording_id)
+        if forgotten:
+            print(f"removed it from {len(forgotten)} memory ledger(s): {', '.join(forgotten)}")
+        for problem in store.problems:
+            print(f"  {problem}")
+        return 1 if failures or store.problems else 0
     finally:
         db.close()
 
@@ -938,6 +949,51 @@ def cmd_retention(args) -> int:
             removed = sweeper.execute(plan)
             print(f"deleted {removed} artifact(s)")
         return 0
+    finally:
+        db.close()
+
+
+def cmd_memory(args) -> int:
+    """
+    What this tool has learned across recordings, per profile.
+
+    Read-only unless you ask otherwise. `--rebuild` throws the ledgers away and
+    replays the archive: slower, and the answer to believe whenever the ledger
+    and the archive disagree.
+    """
+    cfg = _load(args)
+    if args.profile and args.profile not in cfg.profiles:
+        print(f"unknown profile '{args.profile}'. Known: {sorted(cfg.profiles)}")
+        return 1
+
+    db = Database(cfg.path("database"))
+    try:
+        store = MemoryStore(cfg)
+
+        if args.forget:
+            changed = store.forget_recording(args.forget)
+            print(f"\nremoved {args.forget} from {len(changed)} ledger(s)"
+                  + (f": {', '.join(changed)}" if changed else ""))
+        elif args.rebuild:
+            report = store.rebuild(db, Archive(cfg, db), force=args.force)
+            print("\n" + report.render())
+            if not report.saved:
+                for problem in store.problems:
+                    print(f"\n  {problem}", file=sys.stderr)
+                return 1
+
+        for pid in ([args.profile] if args.profile else sorted(cfg.profiles)):
+            if args.brief:
+                brief = carry_forward_brief(cfg, pid, store)
+                if brief:
+                    print(f"\n----- {pid} -----\n{brief}")
+            else:
+                print("\n" + render_ledger(store.ledger(pid), cfg=cfg))
+
+        for problem in store.problems:
+            print(f"\n  {problem}", file=sys.stderr)
+        print()
+        return 1 if store.problems else 0
     finally:
         db.close()
 
@@ -1474,6 +1530,18 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("profiles", help="show the routing table")
     p.set_defaults(func=cmd_profiles)
+
+    p = sub.add_parser("memory", help="what the tool has learned across recordings")
+    p.add_argument("--profile", default=None, help="one profile id (default: every profile)")
+    p.add_argument("--brief", action="store_true",
+                   help="show the briefing that gets injected into the next analysis")
+    p.add_argument("--rebuild", action="store_true",
+                   help="discard the ledgers and rebuild them from the stored archive")
+    p.add_argument("--force", action="store_true",
+                   help="with --rebuild: accept a rebuild that could not open everything")
+    p.add_argument("--forget", default=None, metavar="RECORDING_ID",
+                   help="remove one recording from every ledger")
+    p.set_defaults(func=cmd_memory)
 
     p = sub.add_parser("new-profile", help="scaffold a profile from the template")
     p.add_argument("profile_id", help="identifier and filename stem, e.g. mentor")

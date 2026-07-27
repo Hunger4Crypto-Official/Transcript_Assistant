@@ -388,3 +388,45 @@ ask:
   # Output ceiling for the answer itself. An answer is a paragraph and a few
   # citations; a large number here buys latency and nothing else.
   max_tokens: 2000
+
+memory:
+  # Learning across recordings. Every ledger is built from analyses that are
+  # already stored, so nothing here costs an LLM call and everything here can be
+  # thrown away and rebuilt from the archive: run.py memory --rebuild
+  enabled: true
+  # One encrypted file per profile. Deliberately not under paths.vault: `verify`
+  # lists anything in the vault the artifact index does not know about, and five
+  # ledgers sitting in that list forever would teach you to skim it.
+  dir: "./data/memory"
+  # The briefing injected into the next extraction prompt is hard-capped at this
+  # many characters, newest and most-mentioned first. A briefing long enough to
+  # compete with the transcript is a briefing that changes the analysis.
+  brief_budget_chars: 1500
+  # How long an entry keeps being surfaced after it was last heard. This is not
+  # deletion -- the entry keeps its provenance and simply stops being carried
+  # forward, because a brief full of things that stopped being true is worse
+  # than a short one. 0 means never expire.
+  decay_days:
+    commitment: 180
+    person: 120
+    topic: 90
+    fact: 365
+  # An unkept promise is the thing you most want carried forward, so it outranks
+  # an equally-mentioned subject by this much.
+  commitment_boost: 2.0
+  # Caps on how much one recording can contribute. A single talkative afternoon
+  # should not fill the ledger.
+  max_entry_chars: 200
+  max_items_per_field: 12
+  # Which drawer an extraction field goes in: commitment, person, topic, fact,
+  # or "ignore". The shipped profiles' fields are already mapped in code; map
+  # your own here. A field nobody has classified is left out rather than guessed
+  # at, and sensitive or suppressed fields are never filed whatever this says.
+  field_kinds: {}
+  ignore_fields: []
+  # A commitment is closed only by a later recording that says it was done, in
+  # one of these fields. Declare one in a profile's extraction schema to use it.
+  # Deciding a promise was kept because its words came up again would be
+  # inventing, and a stale open commitment is the cheaper mistake by far.
+  closure_fields: ["completed", "closed_items", "delivered", "done", "resolved"]
+  closure_overlap: 0.75

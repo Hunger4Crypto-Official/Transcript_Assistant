@@ -81,6 +81,9 @@ Other commands:
 | `run.py verify` | Confirm every artifact still exists and still decrypts |
 | `run.py export --days 30` | Build a redacted document for someone else |
 | `run.py forget <id>` | Permanently delete one recording |
+| `run.py memory` | **What it has learned across recordings** |
+| `run.py memory --brief` | The briefing injected into the next analysis |
+| `run.py memory --rebuild` | Rebuild the ledgers from the archive |
 | `run.py open <id>` | Decrypt and print a transcript |
 | `run.py open <id> --kind audio --out f.mp3` | Recover the original recording |
 | `run.py open <id> --kind analysis` | Decrypt and print the structured analysis |

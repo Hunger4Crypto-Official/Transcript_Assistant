@@ -106,7 +106,8 @@ def _coerce(value: Any, type_name: str) -> Any:
 
 def extract(transcript: Transcript, profile: Profile, cfg,
             transcript_text: str | None = None,
-            local_only: bool | None = None) -> ProfileAnalysis:
+            local_only: bool | None = None,
+            prior: str = "") -> ProfileAnalysis:
     """
     Run one profile's extraction schema over a transcript.
 
@@ -146,9 +147,15 @@ def extract(transcript: Transcript, profile: Profile, cfg,
         "always a better answer than a plausible fabrication."
     )
 
+    # The carry-forward brief sits between the schema and the transcript, never
+    # inside it. It arrives already redacted and carries its own line saying it
+    # is background rather than something that was said, because the one thing
+    # this must not do is let last month's conversation be quoted as though it
+    # happened today.
     user = (
         f"SCHEMA:\n{_schema_block(profile)}\n\n"
-        f"TRANSCRIPT:\n{body}\n\n"
+        + (f"{prior.strip()}\n\n" if prior.strip() else "")
+        + f"TRANSCRIPT:\n{body}\n\n"
         "Return the JSON object now."
     )
 

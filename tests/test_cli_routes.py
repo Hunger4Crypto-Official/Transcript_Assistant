@@ -30,6 +30,7 @@ COVERED = {
     "doctor", "run", "watch", "digest", "status", "search", "verify", "forget",
     "export", "open", "audit", "release", "retention", "profiles",
     "new-profile", "voices", "review", "speakers", "followups", "ask",
+    "memory",
 }
 
 
@@ -75,6 +76,9 @@ READ_ONLY = [
     ("ask", "elimination period", "--profile", "insurance_agent"),
     ("ask", "anything at all", "--include-personal", "--days", "30"),
     ("ask", "anything at all", "--local-only"),
+    ("memory",),
+    ("memory", "--brief"),
+    ("memory", "--profile", "insurance_agent"),
     ("followups",),
     ("followups", "--status", "all"),
     ("followups", "--format", "html"),

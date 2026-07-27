@@ -301,8 +301,9 @@ class _StubHandler(BaseHTTPRequestHandler):
             "usage": {"prompt_tokens": len(user) // 4, "completion_tokens": 64},
         }).encode("utf-8")
 
-        with self.server.counter_lock:  # type: ignore[attr-defined]
-            self.server.completions += 1  # type: ignore[attr-defined]
+        server: _StubServer = self.server  # type: ignore[assignment]
+        with server.counter_lock:
+            server.completions += 1
 
         self.send_response(200)
         self.send_header("Content-Type", "application/json")

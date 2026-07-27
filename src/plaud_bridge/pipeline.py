@@ -33,6 +33,7 @@ from .db import Database
 from .diarize import diarize
 from .episodes import segment_episodes, transcript_for
 from .logging_setup import get
+from .memory import MemoryStore, carry_forward_brief
 from .models import (
     ProfileAnalysis,
     Recording,
@@ -60,6 +61,7 @@ class Pipeline:
         cfg.ensure_dirs()
         self.db = Database(cfg.path("database"))
         self.vault = Vault(cfg.path("vault"))
+        self.memory = MemoryStore(cfg)
         self.audio = AudioPreparer(cfg)
         self.gate = ComplianceGate(cfg)
         self.retention = RetentionSweeper(cfg, self.db)
@@ -171,6 +173,7 @@ class Pipeline:
 
             self._analyse(rec)
             self._persist(rec)
+            self._remember(rec)
 
             rec.stage = Stage.COMPLETE
             stats.processed += 1
@@ -388,8 +391,13 @@ class Pipeline:
             for name, count in counts.items():
                 rec.compliance.redactions[name] = rec.compliance.redactions.get(name, 0) + count
 
+            # What we already know about this profile, from recordings already
+            # analysed. Built from stored artifacts, so it costs no model call,
+            # and it is per profile: the Husband ledger never reaches an
+            # Insurance Agent prompt.
+            prior = carry_forward_brief(self.cfg, profile.id, self.memory)
             analysis: ProfileAnalysis = extract(
-                portion, profile, self.cfg, redacted, local_only=local_only
+                portion, profile, self.cfg, redacted, local_only=local_only, prior=prior
             )
             rec.analyses.append(analysis)
             rec.total_cost_usd += analysis.cost_usd
@@ -403,6 +411,23 @@ class Pipeline:
         rec.stage = Stage.ANALYZED
 
     # ---- persistence ----------------------------------------------------
+    def _remember(self, rec: Recording) -> None:
+        """
+        Fold this recording into the per-profile memory ledgers.
+
+        After persistence, deliberately: memory is derived from what is stored,
+        so a recording that failed to persist must not be remembered as though
+        it had. Nothing here can fail the run. A ledger that could not be
+        written is a lost convenience, and `run.py memory --rebuild` gets it
+        back from the archive.
+        """
+        if not self.cfg.get("memory.enabled", True):
+            return
+        try:
+            self.memory.update_from_record(rec)
+        except Exception as exc:  # noqa: BLE001 - memory is a convenience, not the product
+            log.warning("could not update memory for %s: %s", rec.id, exc)
+
     def _persist(self, rec: Recording) -> None:
         governing = self.cfg.profile(rec.compliance.governing_profile or "unfiled")
         # Read the gate's verdict rather than re-deriving it, so this and the
