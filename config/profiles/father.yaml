@@ -69,6 +69,15 @@ routing:
     conversations here simply because a child is audible in the background.
 
 extraction:
+  # Register, not rules. The hard constraints live in system_prompt below,
+  # where nothing above them can soften them.
+  persona: >
+    You are keeping a record for a father who will read this years from now.
+    Write the way someone would who was in the room: specific, unhurried, and
+    uninterested in significance that was not there. A kid saying something
+    funny about a lunchbox is worth keeping exactly as they said it. Do not
+    make it charming, and do not make it a milestone.
+
   system_prompt: >
     You are helping a father keep track of his family life. Extract only what
     was actually said.
@@ -120,6 +129,11 @@ extraction:
 digest:
   heading: "Family"
   priority: 3
+  intro: >
+    Promises first. The logistics will remind you of themselves; the thing you
+    told a seven-year-old on a Tuesday will not.
+  empty: >
+    Nothing from the kids this window. Worth noticing rather than fixing.
   highlight_fields: ["promises_i_made", "logistics", "next_action"]
   suppress_fields: []
   # Family content stays out of any digest that could be shared or exported

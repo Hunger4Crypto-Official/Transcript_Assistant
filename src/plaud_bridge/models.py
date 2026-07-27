@@ -24,6 +24,13 @@ def new_id(prefix: str) -> str:
     return f"{prefix}_{uuid.uuid4().hex[:16]}"
 
 
+def format_stamp(seconds: float) -> str:
+    """MM:SS, or HH:MM:SS once it runs past an hour. One copy, used everywhere."""
+    minutes, secs = divmod(int(max(0.0, seconds)), 60)
+    hours, minutes = divmod(minutes, 60)
+    return f"{hours:02d}:{minutes:02d}:{secs:02d}" if hours else f"{minutes:02d}:{secs:02d}"
+
+
 class Sensitivity(str, Enum):
     """Ordered. Higher ordinal wins when profiles collide on one recording."""
 
@@ -72,9 +79,7 @@ class Segment:
         return max(0.0, self.end - self.start)
 
     def stamp(self) -> str:
-        m, s = divmod(int(self.start), 60)
-        h, m = divmod(m, 60)
-        return f"{h:02d}:{m:02d}:{s:02d}" if h else f"{m:02d}:{s:02d}"
+        return format_stamp(self.start)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -177,6 +182,18 @@ class ComplianceVerdict:
     consent_quote: str = ""
     consent_timestamp: float | None = None
     force_local_processing: bool = False
+
+    # Whether this recording's content is encrypted at rest, and therefore
+    # whether the plain SQLite index may hold a copy of it.
+    #
+    # Defaults to True, which looks paranoid and is not. This verdict is only
+    # filled in once the compliance gate has run, and a recording can fail
+    # between transcription and the gate -- a provider outage, a malformed
+    # profile, anything. With a False default, that failure wrote the complete
+    # plaintext transcript of a family conversation into an unencrypted file
+    # and left it there forever. Assuming encryption until a profile says
+    # otherwise costs nothing and closes that window.
+    encrypt_at_rest: bool = True
     redactions: dict[str, int] = field(default_factory=dict)
     governing_profile: str = ""
     governing_sensitivity: Sensitivity = Sensitivity.LOW
@@ -221,6 +238,9 @@ class Recording:
 
     transcript: Transcript | None = None
     routes: list[RouteMatch] = field(default_factory=list)
+    # Set by the pipeline. Typed loosely to keep models.py free of imports from
+    # the modules that depend on it.
+    episodes: list[Any] = field(default_factory=list)
     compliance: ComplianceVerdict = field(default_factory=ComplianceVerdict)
     analyses: list[ProfileAnalysis] = field(default_factory=list)
 
@@ -234,7 +254,17 @@ class Recording:
 
     @property
     def is_encrypted(self) -> bool:
-        return self.compliance.governing_sensitivity.rank >= Sensitivity.HIGH.rank
+        """
+        One answer, from one place.
+
+        This used to be derived from sensitivity while `_persist` decided using
+        the profile's `encrypt_at_rest` flag. Two sources of truth for the same
+        question, and a perfectly legal profile -- high sensitivity with
+        encryption turned off -- made them disagree: the artifacts were written
+        in plaintext while the index withheld them as though encrypted, so the
+        digest could never render that recording again.
+        """
+        return self.compliance.encrypt_at_rest
 
     def analysis_for(self, profile_id: str) -> ProfileAnalysis | None:
         return next((a for a in self.analyses if a.profile_id == profile_id), None)
@@ -293,6 +323,7 @@ class Recording:
             "duration_seconds": self.duration_seconds,
             "transcript": transcript,
             "routes": [r.to_dict() for r in self.routes],
+            "episodes": [e.to_dict() for e in self.episodes],
             "compliance": self.compliance.to_dict(),
             "analyses": analyses,
             "total_cost_usd": self.total_cost_usd,

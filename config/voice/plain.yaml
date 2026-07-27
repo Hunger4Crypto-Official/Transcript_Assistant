@@ -1,0 +1,68 @@
+# =============================================================================
+# Voice :: Plain
+# =============================================================================
+# Neutral and factual. The default, and the right choice if you are not sure.
+#
+# A voice pack overrides strings; it inherits every key it does not mention, so
+# a three-line pack is a legitimate pack. Copy this file, change what you want,
+# and point voice.preset in pipeline.yaml at it.
+#
+# Placeholders available per key are listed in the comments. An unknown
+# placeholder renders empty rather than breaking the digest.
+# =============================================================================
+
+id: plain
+name: "Plain"
+description: "Neutral and factual. Says what happened and gets out of the way."
+
+digest:
+  title: "Digest"
+  profile_title: "{profile_name}"           # {profile_name} {profile_short}
+  window: "**Window:** {start} to {end} ({days} days)  "
+  generated: "**Generated:** {generated} UTC"
+  empty: "No recordings in this window."
+  opening: ""                                # optional line under the header
+
+  needs_you:
+    heading: "Needs You"
+    intro: ""
+    why_flagged: "flagged for human review"
+    why_error: "error: {error}"
+    attention_line: "- **{section}** :: `{name}` {why}"
+    action_line: "- **{section}** :: {action}  \n  <sub>{name}</sub>"
+    empty: ""
+
+  glance:
+    heading: "At a Glance"
+    columns: "| Section | Recordings | Minutes |"
+    row: "| {section} | {count} | {minutes} |"
+
+  section:
+    intro: ""                                # per-profile digest.intro wins
+    suppressed_note: "> {note}"
+
+  entry:
+    attention_note: >-
+      > This recording was flagged for human attention and was not summarised.
+      Read it yourself.
+    error_note: "> Analysis error: {error}"
+    nothing_extracted: "_Nothing extracted for the highlighted fields._"
+    next_action: "**Next:** {action}"
+    withheld: "**{label}**: {count} item(s), withheld from this view."
+    files: "<sub>Files: {links}</sub>"
+    encrypted: "<sub>Encrypted: {kinds} (open with: run.py open {id})</sub>"
+
+  footer:
+    costs: "<sub>{minutes} minutes processed · ${cost} in API spend across this window.</sub>"
+    personal_hidden: >-
+      <sub>Personal profiles ({names}) are omitted from the combined view.
+      Use `--profile {example}` or `--include-personal` to see them.</sub>
+    sign_off: ""
+
+analysis:
+  # Prepended to every profile's extraction prompt. The profile's own prompt
+  # follows this and wins on anything specific.
+  house_style: >-
+    Write in plain, concrete language. Prefer the speaker's own words to a
+    paraphrase. Do not editorialise, congratulate, or soften. An empty field is
+    always better than a plausible invention.

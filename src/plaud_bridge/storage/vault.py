@@ -31,6 +31,11 @@ except Exception:  # pragma: no cover
     _AESGCM_AVAILABLE = False
 
 MAGIC = b"PBV1"
+# Streaming format, for artifacts too large to hold in memory twice. A full day
+# of audio is several hundred megabytes, and encrypting it the one-shot way
+# needs the plaintext and the ciphertext resident at the same time.
+MAGIC_STREAM = b"PBS1"
+STREAM_CHUNK = 4 * 1024 * 1024
 SCRYPT_N = 2**15
 SCRYPT_R = 8
 SCRYPT_P = 1
@@ -127,6 +132,163 @@ class Vault:
         except OSError:
             pass
         return dest
+
+    # ---- streaming -------------------------------------------------------
+    #
+    # A day of audio does not fit comfortably in memory twice, so large
+    # artifacts are encrypted a chunk at a time into a second format.
+    #
+    # Each chunk carries its own nonce and is bound by AAD to the recording id,
+    # its own index, and whether it is the last one. That is what stops the
+    # three attacks a naive chunked format invites: reordering chunks, dropping
+    # chunks from the middle, and truncating the file. A reader that does not
+    # see index 0, then 1, then 2, ending on a chunk marked final, refuses.
+    def _stream_aad(self, recording_id: str, index: int, final: bool) -> bytes:
+        return f"{recording_id}|{index}|{'end' if final else 'mid'}".encode()
+
+    def write_stream(self, relative: str, source: Path, recording_id: str = "",
+                     chunk_size: int = STREAM_CHUNK) -> Path:
+        """Encrypt a file into the vault without loading it whole."""
+        if not _AESGCM_AVAILABLE:
+            raise VaultError(
+                "cryptography is not installed; refusing to write sensitive data "
+                "unencrypted. Install it with: pip install cryptography"
+            )
+        source = Path(source)
+        salt = secrets.token_bytes(SALT_LEN)
+        key = self._derive(salt)
+        aes = AESGCM(key)
+
+        dest = self.root / f"{relative}.enc"
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        tmp = dest.with_name(dest.name + ".tmp")
+
+        try:
+            with open(source, "rb") as fin, open(tmp, "wb") as fout:
+                fout.write(MAGIC_STREAM)
+                fout.write(salt)
+                fout.write(chunk_size.to_bytes(4, "big"))
+
+                index = 0
+                block = fin.read(chunk_size)
+                while True:
+                    nxt = fin.read(chunk_size)
+                    final = not nxt
+                    nonce = secrets.token_bytes(NONCE_LEN)
+                    body = aes.encrypt(nonce, block, self._stream_aad(recording_id, index, final))
+                    fout.write(nonce)
+                    fout.write(len(body).to_bytes(4, "big"))
+                    fout.write(body)
+                    if final:
+                        break
+                    block, index = nxt, index + 1
+            os.replace(tmp, dest)
+        except OSError:
+            tmp.unlink(missing_ok=True)
+            raise
+
+        try:
+            os.chmod(dest, 0o600)
+        except OSError:
+            pass
+        return dest
+
+    def _stream_plaintext(self, path: Path, recording_id: str):
+        """
+        Yield the plaintext of a streamed artifact one chunk at a time.
+
+        Nothing here touches a destination. Decrypting and decrypting-to-a-file
+        are the same walk over the same chunks, and keeping the walk separate
+        from the writing is what lets `verify_stream` prove an artifact opens
+        without needing somewhere to put it.
+        """
+        if not _AESGCM_AVAILABLE:
+            raise VaultError("cryptography is not installed; cannot decrypt.")
+
+        with open(path, "rb") as fin:
+            if fin.read(len(MAGIC_STREAM)) != MAGIC_STREAM:
+                # Not streamed. Small enough for the one-shot path by definition.
+                yield self.read(path, recording_id)
+                return
+
+            salt = fin.read(SALT_LEN)
+            fin.read(4)                       # chunk size, informational
+            key = self._derive(salt)
+            aes = AESGCM(key)
+
+            index = 0
+            saw_final = False
+            while True:
+                nonce = fin.read(NONCE_LEN)
+                if not nonce:
+                    break
+                raw = fin.read(4)
+                if len(nonce) != NONCE_LEN or len(raw) != 4:
+                    raise VaultError("vault file is truncated mid-chunk")
+                body = fin.read(int.from_bytes(raw, "big"))
+
+                # Try "not final" first, then "final". The AAD is what makes a
+                # dropped or reordered chunk fail rather than silently
+                # producing a shorter file.
+                for final in (False, True):
+                    try:
+                        block = aes.decrypt(
+                            nonce, body, self._stream_aad(recording_id, index, final)
+                        )
+                    except Exception:  # noqa: BLE001 - try the other marker
+                        continue
+                    saw_final = final
+                    yield block
+                    break
+                else:
+                    raise VaultError(
+                        f"decryption failed at chunk {index}. Either the "
+                        "passphrase is wrong or the file has been modified."
+                    )
+                if saw_final:
+                    break
+                index += 1
+
+            if not saw_final:
+                raise VaultError(
+                    "vault file ended without its final chunk; it has been "
+                    "truncated. Refusing to hand back a partial recording."
+                )
+
+    def read_stream(self, path: Path, dest: Path, recording_id: str = "") -> Path:
+        """Decrypt a streamed artifact to a file, a chunk at a time."""
+        path, dest = Path(path), Path(dest)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+
+        tmp = dest.with_name(dest.name + ".part")
+        try:
+            with open(tmp, "wb") as fout:
+                for block in self._stream_plaintext(path, recording_id):
+                    fout.write(block)
+            os.replace(tmp, dest)
+        except BaseException:
+            tmp.unlink(missing_ok=True)
+            raise
+        return dest
+
+    def verify_stream(self, path: Path, recording_id: str = "") -> None:
+        """
+        Prove an artifact decrypts, writing nothing anywhere.
+
+        A day of audio is too big to hold in memory and a decrypted copy on
+        disk is exactly what the vault exists to prevent, so verification
+        walks the chunks and discards each one.
+        """
+        for _ in self._stream_plaintext(Path(path), recording_id):
+            pass
+
+    @staticmethod
+    def is_streamed(path: Path) -> bool:
+        try:
+            with open(path, "rb") as fh:
+                return fh.read(len(MAGIC_STREAM)) == MAGIC_STREAM
+        except OSError:
+            return False
 
     def read(self, path: Path, recording_id: str = "") -> bytes:
         return self.decrypt_bytes(Path(path).read_bytes(), recording_id.encode("utf-8"))

@@ -125,8 +125,16 @@ def extract(transcript: Transcript, profile: Profile, cfg,
             error="empty transcript",
         )
 
+    # Prompt layering, outermost first: house style sets the register for every
+    # profile, persona narrows it for this one, and the profile's own prompt --
+    # which carries the hard constraints on the family profiles -- comes last so
+    # it is nearest the task and cannot be softened by anything above it.
+    house_style = str(getattr(cfg, "voice", None) and cfg.voice.get("analysis.house_style") or "")
+    preamble = "\n\n".join(p for p in (house_style, profile.persona) if p.strip())
+
     system = (
-        f"{profile.system_prompt}\n\n"
+        (f"{preamble}\n\n" if preamble else "")
+        + f"{profile.system_prompt}\n\n"
         "OUTPUT CONTRACT:\n"
         "- Respond with a single JSON object and nothing else. No preamble, no "
         "code fences, no trailing commentary.\n"

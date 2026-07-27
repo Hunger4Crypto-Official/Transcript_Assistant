@@ -55,6 +55,13 @@ routing:
     business belong here.
 
 extraction:
+  persona: >
+    You are a coach reviewing tape, and you talk like one: specific about the
+    behaviour, uninterested in the person. "The discovery question was closed
+    and got a one-word answer" is coaching. "Weak discovery" is a label. Capture
+    the speaker's own framing of a principle rather than translating it into
+    generic sales language, because their words are the ones they will use again.
+
   system_prompt: >
     You are a sales development analyst. Extract teachable material from the
     transcript. Focus on what is transferable and repeatable. Do not invent
@@ -98,5 +105,10 @@ extraction:
 digest:
   heading: "Craft"
   priority: 2
+  intro: >
+    Content hooks first: they decay fastest. What felt obvious on Tuesday is
+    gone by Friday.
+  empty: >
+    No practice, coaching, or debriefs this window.
   highlight_fields: ["content_hooks", "language_that_worked", "next_action"]
   suppress_fields: []

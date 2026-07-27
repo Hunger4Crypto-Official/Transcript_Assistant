@@ -1,0 +1,58 @@
+# =============================================================================
+# Voice :: Brief
+# =============================================================================
+# For someone who opens the digest on a phone between appointments. Strips the
+# ceremony: no cost footer chatter, shorter headings, tighter lines.
+#
+# Use this when the digest is a working document rather than a record.
+# =============================================================================
+
+id: brief
+name: "Brief"
+description: "Short and scannable. For reading on a phone between appointments."
+
+digest:
+  title: "Brief"
+  profile_title: "{profile_short}"
+  window: "{start} → {end}  "
+  generated: "_{generated} UTC_"
+  empty: "Nothing this week."
+  opening: ""
+
+  needs_you:
+    heading: "Do This"
+    intro: ""
+    why_flagged: "read this one yourself"
+    why_error: "failed: {error}"
+    attention_line: "- **{section}** — `{name}`, {why}"
+    action_line: "- {action}  \n  <sub>{section} · {name}</sub>"
+    empty: ""
+
+  glance:
+    heading: "Counts"
+    columns: "| | # | min |"
+    row: "| {section} | {count} | {minutes} |"
+
+  section:
+    intro: ""
+    suppressed_note: "> {note}"
+
+  entry:
+    attention_note: "> Flagged. Not summarised. Read it."
+    error_note: "> Failed: {error}"
+    nothing_extracted: "_Nothing._"
+    next_action: "**Next:** {action}"
+    withheld: "**{label}**: {count} withheld."
+    files: "<sub>{links}</sub>"
+    encrypted: "<sub>Encrypted — `run.py open {id}`</sub>"
+
+  footer:
+    costs: "<sub>{minutes} min · ${cost}</sub>"
+    personal_hidden: "<sub>Personal profiles hidden. `--include-personal` to show.</sub>"
+    sign_off: ""
+
+analysis:
+  house_style: >-
+    Be brief. One clause where a sentence would do. Quote the speaker rather
+    than describing what they meant. Never pad a field to look thorough — an
+    empty field is a real answer.

@@ -71,6 +71,14 @@ routing:
     sell belongs in Sales Trainer, not here.
 
 extraction:
+  persona: >
+    You are the analyst a careful producer would want reading his own calls
+    back to him. You are not a coach and not a compliance officer, but you know
+    what a regulator would underline. Quote the client exactly, especially when
+    what they said is inconvenient. When the producer said something that could
+    be read as a guarantee, a projection, or a tax opinion, you write it down
+    plainly rather than characterising it.
+
   system_prompt: >
     You are an analyst supporting a licensed life and disability insurance
     producer. Read the transcript and extract only what is actually present.
@@ -132,6 +140,12 @@ extraction:
 digest:
   heading: "Production"
   priority: 1
+  intro: >
+    Read `statements_needing_review` before anything else. It is the highest
+    value output in the system and the only one that gets more useful the worse
+    the week was.
+  empty: >
+    No client conversations in this window.
   highlight_fields: ["next_action", "statements_needing_review", "objections"]
   # Never render these into the plaintext digest. They stay in the vault.
   suppress_fields: ["health_disclosures", "financial_disclosures"]

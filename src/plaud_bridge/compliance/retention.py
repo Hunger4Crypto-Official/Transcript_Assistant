@@ -36,19 +36,32 @@ class RetentionItem:
 class RetentionPlan:
     items: list[RetentionItem] = field(default_factory=list)
     dry_run: bool = True
+    audit_rows: int = 0
+    audit_cutoff: datetime | None = None
 
     @property
     def total_bytes(self) -> int:
         return sum(i.size_bytes for i in self.items)
 
+    @property
+    def empty(self) -> bool:
+        return not self.items and not self.audit_rows
+
     def render(self) -> str:
-        if not self.items:
+        if self.empty:
             return "Retention sweep: nothing has expired."
         lines = [
             f"Retention sweep {'(DRY RUN, nothing deleted)' if self.dry_run else '(LIVE)'}",
             f"{len(self.items)} artifact(s), {self.total_bytes / 1_048_576:.1f} MB",
             "",
         ]
+        if self.audit_rows:
+            lines.append(
+                f"  audit trail  {self.audit_rows} row(s) older than "
+                f"{self.audit_cutoff:%Y-%m-%d}" if self.audit_cutoff else
+                f"  audit trail  {self.audit_rows} row(s)"
+            )
+            lines.append("")
         for item in self.items:
             state = "" if item.exists else "  [already gone]"
             lines.append(f"  {item.kind:12s} {item.recording_id}  expired {item.expires_at[:10]}{state}")
@@ -68,7 +81,9 @@ class RetentionSweeper:
     def expires_at(self, kind: str, profile, created: datetime | None = None) -> datetime | None:
         """Per-profile retention wins over the pipeline default."""
         created = created or datetime.now(timezone.utc)
-        if kind == "audio":
+        if kind in ("audio", "source"):
+            # "source" is an imported transcript file. It is the same thing to
+            # the person who dropped it in: the original they handed over.
             days = profile.raw_audio_days
         elif kind in ("transcript", "analysis", "markdown"):
             days = profile.transcript_days
@@ -98,6 +113,10 @@ class RetentionSweeper:
                     size_bytes=path.stat().st_size if exists else 0,
                 )
             )
+
+        cutoff = self.audit_cutoff(now)
+        plan.audit_cutoff = cutoff
+        plan.audit_rows = self.db.count_audit_before(cutoff)
         return plan
 
     def execute(self, plan: RetentionPlan) -> int:
@@ -111,10 +130,28 @@ class RetentionSweeper:
                 "dry_run=False if you actually mean to delete these artifacts."
             )
 
+        from ..archive import is_owned, owned_roots
+
+        roots = owned_roots(self.cfg)
         removed = 0
         for item in plan.items:
             path = Path(item.path)
             if path.exists():
+                # The index is a file, and a file can be restored from a backup,
+                # hand-edited, or written when the paths meant something else.
+                # An expiry sweep that unlinks whatever it is told to is how a
+                # tool deletes something that was never its business.
+                if not is_owned(path, roots):
+                    log.error(
+                        "refusing to delete %s: outside every configured data "
+                        "directory. Left alone; fix the index.", path,
+                    )
+                    self.db.audit(
+                        "retention_refused",
+                        f"kind={item.kind} path outside the data directory: {path}",
+                        item.recording_id,
+                    )
+                    continue
                 try:
                     path.unlink()
                     removed += 1
@@ -127,5 +164,28 @@ class RetentionSweeper:
                 f"kind={item.kind} expired={item.expires_at}",
                 item.recording_id,
             )
+
+        if plan.audit_rows:
+            deleted = self.db.delete_audit_before(plan.audit_cutoff)
+            log.info("retention sweep removed %d audit row(s)", deleted)
+
         log.info("retention sweep removed %d artifact(s)", removed)
         return removed
+
+    # ---- audit trail ----------------------------------------------------
+    def audit_cutoff(self, now: datetime | None = None) -> datetime:
+        """
+        How far back the audit trail is kept.
+
+        COMPLIANCE section 5 gives an `audit_log_days` per profile, but an audit
+        row is not owned by a profile -- it records ingests, run summaries, and
+        deletions of recordings that may have been removed already. Keeping the
+        LONGEST window any profile asks for is the only reading that never
+        deletes a record something still needs.
+        """
+        now = now or datetime.now(timezone.utc)
+        days = max(
+            [p.audit_log_days for p in self.cfg.profiles.values() if p.audit_log_days > 0]
+            or [int(self.cfg.get("retention.default_audit_days", 730))]
+        )
+        return now - timedelta(days=days)

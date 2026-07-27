@@ -74,16 +74,26 @@ Other commands:
 |---|---|
 | `run.py doctor` | Preflight every dependency, key, and profile |
 | `run.py status` | Index summary: counts, hours, spend |
-| `run.py search "elimination period"` | Find recordings |
+| `run.py watch` | Process the inbox on an interval until you stop it |
+| `run.py search "elimination period"` | Find recordings by filename |
+| `run.py search "own occupation" --content` | **Search what was actually said** |
+| `run.py verify` | Confirm every artifact still exists and still decrypts |
+| `run.py export --days 30` | Build a redacted document for someone else |
+| `run.py forget <id>` | Permanently delete one recording |
 | `run.py open <id>` | Decrypt and print a transcript |
+| `run.py open <id> --kind audio --out f.mp3` | Recover the original recording |
 | `run.py open <id> --kind analysis` | Decrypt and print the structured analysis |
 | `run.py audit` | Read the compliance audit log |
 | `run.py audit --recording-id <id>` | Everything that happened to one recording |
 | `run.py audit --actor human --out audit.csv` | Export the human decisions |
+| `run.py review` | What the review cadence says is due right now |
+| `run.py review --reaffirm father` | Record a standing-consent reaffirmation |
 | `run.py release <id>` | Release a quarantined recording after review |
 | `run.py retention` | Dry-run the expiry sweep |
 | `run.py retention --execute` | Actually delete expired artifacts |
 | `run.py profiles` | Show the routing table |
+| `run.py new-profile <id>` | Scaffold a new profile from the template |
+| `run.py voices` | Show the installed voice packs |
 
 `pip install -e .` installs the same commands as `plaud-bridge`, if you would
 rather not type `python run.py` from the project directory.
@@ -148,6 +158,162 @@ extraction:
 
 Add it, rerun, done. No code change.
 
+### Adding a profile
+
+```bash
+python run.py new-profile mentor --name "Mentor" --heading "Mentorship"
+```
+
+That copies `config/profiles/_TEMPLATE.yaml`, which documents every key inline,
+with the ids filled in. Give it keywords and an `llm_hint` — without them the
+router has nothing to go on and the profile will never match anything.
+
+Files starting with an underscore are ignored by the loader, so the template
+itself never becomes a profile.
+
+---
+
+## Voice
+
+The digest is the thing you actually read, so how it reads is config.
+
+```bash
+python run.py voices                    # what is installed, and what is active
+python run.py digest --format html      # self-contained page, prints cleanly
+```
+
+Three packs ship in `config/voice/`:
+
+| Pack | For |
+|---|---|
+| `plain` | Neutral and factual. The default. |
+| `brief` | Short and scannable, for reading on a phone between appointments. |
+| `warm` | Written like a person assembled it. Suits `--profile father` / `husband`. |
+
+Switch with `voice.preset` in `pipeline.yaml`. Change a single line without
+copying a whole pack:
+
+```yaml
+voice:
+  preset: "plain"
+  overrides:
+    digest:
+      needs_you:
+        heading: "Before You Do Anything Else"
+```
+
+Profiles carry their own voice too — `digest.intro` opens a section,
+`digest.empty` is what it says when the window turned up nothing, and
+`extraction.persona` sets the register for that profile's analysis without
+touching the hard constraints in its `system_prompt`.
+
+**What voice cannot do.** It supplies words, never structure. Suppressed fields
+still never render, personal profiles still stay out of the combined digest, and
+a flagged recording still says so bluntly. A digest is the document most likely
+to be forwarded, so the rules about what appears in it stay in code where a YAML
+edit cannot reach them.
+
+---
+
+## Getting things back out
+
+An archive you cannot search is a filing cabinet you cannot open.
+
+```bash
+python run.py search "own occupation" --content
+python run.py search "biopsy" --content --profile husband --context 2
+```
+
+`--content` searches what was said, decrypting the vault where it has to, and
+prints the timestamp and speaker of every hit. It scans **everything** in the
+window by default; `--scan-limit N` bounds the work and then says the answer is
+incomplete.
+
+**A search that could not look says so and exits non-zero** — whether a file
+would not decrypt or a bound stopped it early. Concluding a phrase was never
+said, when really nothing opened it, is the worst thing a search over your own
+archive can do to you.
+
+### Verify
+
+```bash
+python run.py verify
+```
+
+Opens every artifact the index points at. Missing files, silent corruption, and
+a wrong passphrase all show up here. **An encrypted archive you have never tried
+to decrypt is one you might already have lost** — this is the command that tells
+you while it is still fixable. It also lists files on disk the index does not
+know about, and never deletes anything.
+
+If the vault is locked it reports encrypted artifacts as *unchecked*, not as
+healthy. It will not claim a clean bill it could not confirm.
+
+### Export
+
+```bash
+python run.py export --days 30 --out handover.md
+python run.py export --days 30 --transcripts --format html --out notes.html
+```
+
+The digest is written for you and assumes you are the only reader. An export is
+the opposite: redaction applied, suppressed fields still never included,
+personal profiles refused unless you pass `--include-personal`, and a footer
+that states plainly that redaction is pattern matching rather than a guarantee.
+That footer prints even when nothing matched, because "no pattern fired" is not
+the same as "nothing sensitive is in here".
+
+### Forget
+
+```bash
+python run.py forget rec_1a2b3c4d
+```
+
+Deletes one recording completely: vault artifacts, outbox files, the archived
+original, the quarantine folder, and the index entry. It shows you the exact
+file list and requires you to type `FORGET`.
+
+The audit log keeps a record that the deletion happened, by a human, at a time.
+Everything else goes. An audit trail that forgets deletions is not a trail.
+
+---
+
+## Running it without remembering to
+
+```bash
+python run.py watch --interval 300     # poll the inbox until you stop it
+```
+
+Or hand it to your scheduler. `run` is idempotent — content-hash dedupe means a
+file already processed is skipped, so running it too often costs nothing:
+
+```cron
+*/15 * * * *  cd /path/to/plaud-bridge && .venv/bin/plaud-bridge run
+0    7 * * 1  cd /path/to/plaud-bridge && .venv/bin/plaud-bridge digest --days 7 --format html --out data/outbox/week.html
+0    9 1 * *  cd /path/to/plaud-bridge && .venv/bin/plaud-bridge review
+```
+
+The passphrase has to reach the process. A cron job with no
+`PLAUD_BRIDGE_PASSPHRASE` will transcribe and then refuse to write anything
+encrypted, which is the correct failure but a confusing one to debug at 7am.
+
+---
+
+## The review cadence
+
+`COMPLIANCE.md` asks you to read certain things weekly, monthly, quarterly, and
+annually. Asking a person to hold a four-tier schedule in their head is asking
+them to stop by March, so:
+
+```bash
+python run.py review
+```
+
+assembles all four and tells you what is actually due: standing consent
+reaffirmations that have lapsed, `statements_needing_review` across your client
+calls, unfiled recordings with the keywords that would have routed them, and
+artifacts past their expiry. It reports; it never deletes.
+
 ---
 
 ## Digest behaviour worth knowing
@@ -198,7 +364,7 @@ which means the halt threshold cannot see it.
 python -m pytest tests/ -q
 ```
 
-81 tests, no network and no API keys required.
+143 tests, no network and no API keys required.
 
 The ones that matter most are in **`test_privacy_guarantees.py`**. Every test
 there corresponds to a sentence this README states as a promise: a family
@@ -209,5 +375,7 @@ regression, not a bug.
 
 After that: `test_config.py` for the local-only locks, `test_end_to_end.py` for
 the spine, `test_cost_and_audit.py` for the spend ceiling and the audit trail,
-and `test_ingest_and_logging.py` for the quiet failures — the ones where nothing
-raises and the transcript is simply missing words.
+`test_ingest_and_logging.py` for the quiet failures — the ones where nothing
+raises and the transcript is simply missing words — and
+`test_voice_and_templates.py`, which includes the check that no voice pack can
+talk the digest into printing a suppressed field.

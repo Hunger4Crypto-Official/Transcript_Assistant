@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import re
 import shutil
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -30,10 +31,12 @@ from .config import Config
 from .correct import apply_corrections
 from .db import Database
 from .diarize import diarize
+from .episodes import segment_episodes, transcript_for
 from .logging_setup import get
 from .models import (
     ProfileAnalysis,
     Recording,
+    RouteMatch,
     RunStats,
     Segment,
     Stage,
@@ -53,6 +56,7 @@ class PipelineError(RuntimeError):
 class Pipeline:
     def __init__(self, cfg: Config):
         self.cfg = cfg
+        self.unsettled: list[Path] = []
         cfg.ensure_dirs()
         self.db = Database(cfg.path("database"))
         self.vault = Vault(cfg.path("vault"))
@@ -71,10 +75,18 @@ class Pipeline:
         text_ext = {e.lower() for e in self.cfg.get("ingest.text_extensions", [])}
         allowed = audio_ext | text_ext
         max_mb = float(self.cfg.get("ingest.max_file_mb", 512))
+        settle = float(self.cfg.get("ingest.settle_seconds", 5))
+        now = time.time()
 
         archive = inbox / "_processed"
 
         found: list[Path] = []
+        # All three are surfaced so a run that processed nothing can explain
+        # itself rather than looking broken. "inbox is empty" said over a
+        # directory with files in it is worse than no message at all.
+        self.unsettled: list[Path] = []
+        self.unsupported: list[Path] = []
+        self.oversize: list[tuple[Path, float]] = []
         for path in sorted(inbox.rglob("*")):
             if not path.is_file() or path.name.startswith("."):
                 continue
@@ -84,11 +96,23 @@ class Pipeline:
             if archive in path.parents:
                 continue
             if path.suffix.lower() not in allowed:
+                log.info("skipping %s: %s is not an ingestible extension",
+                         path.name, path.suffix or "(no extension)")
+                self.unsupported.append(path)
+                continue
+            # A file still being copied in is a partial file, and its content
+            # hash is what dedupe remembers forever. Under `watch` this is not
+            # hypothetical: the poll lands mid-copy sooner or later.
+            if settle > 0 and (now - path.stat().st_mtime) < settle:
+                log.info("skipping %s: modified %.0fs ago, still settling",
+                         path.name, now - path.stat().st_mtime)
+                self.unsettled.append(path)
                 continue
             size_mb = path.stat().st_size / (1024 * 1024)
             if size_mb > max_mb:
                 log.warning("skipping %s: %.0fMB exceeds ingest.max_file_mb (%.0f)",
                             path.name, size_mb, max_mb)
+                self.oversize.append((path, size_mb))
                 continue
             found.append(path)
         return found
@@ -128,7 +152,12 @@ class Pipeline:
             else:
                 self._load_text(rec, path)
 
-            if rec.transcript is None or not rec.transcript.segments:
+            # Segments existing is not the same as speech existing. A file of
+            # whitespace, or a byte order mark, or a stretch of zero-width
+            # characters parses into segments that hold nothing, and indexing
+            # that as a recording spends an LLM call to analyse silence and
+            # leaves a phantom entry in every digest thereafter.
+            if rec.transcript is None or not _has_speech(rec.transcript.segments):
                 raise PipelineError("no transcribable content found")
 
             rec.stage = Stage.CORRECTED
@@ -200,7 +229,12 @@ class Pipeline:
 
     def _load_text(self, rec: Recording, path: Path) -> None:
         """Accept a Plaud-exported transcript directly, skipping ASR entirely."""
-        raw = path.read_text(encoding="utf-8", errors="replace")
+        # utf-8-sig strips the byte order mark other tools leave at the front.
+        # Without it the first speaker's name carries an invisible character,
+        # which is enough to stop the speaker-label heuristics recognising it —
+        # and a file containing nothing but a BOM reads as one segment of
+        # content that is not there.
+        raw = path.read_text(encoding="utf-8-sig", errors="replace")
         segments = _parse_text_transcript(raw, path.suffix.lower())
         rec.transcript = Transcript(
             segments=segments,
@@ -268,13 +302,43 @@ class Pipeline:
         # fact-find full of health and financial disclosures went to a cloud
         # provider whenever it happened not to mention anyone's family.
         local_only = not self.cfg.cloud_llm_permitted_by_every_profile()
-        routing = route(rec.transcript, self.cfg, local_only=local_only)
-        rec.routes = routing.matches
-        rec.total_cost_usd += routing.cost_usd
+
+        # A day is not one conversation. Cut it into episodes and route each on
+        # its own, or a ten-hour recording gets classified from whatever
+        # happened to land in the router's character budget.
+        rec.episodes = segment_episodes(rec.transcript, self.cfg)
+        cap = int(self.cfg.get("episodes.max_per_recording", 40))
+        if len(rec.episodes) > cap:
+            log.warning(
+                "%d episodes exceeds episodes.max_per_recording (%d); routing the "
+                "first %d and folding the rest into the last one",
+                len(rec.episodes), cap, cap,
+            )
+            tail = rec.episodes[cap - 1:]
+            merged = tail[0]
+            for extra in tail[1:]:
+                merged.segments.extend(extra.segments)
+            rec.episodes = rec.episodes[: cap - 1] + [merged]
+
+        # Confidence for the recording as a whole is the best any episode
+        # managed. A single genuinely-Father episode in a work day means the day
+        # contains Father material, and ADR-002 then governs the whole file.
+        best: dict[str, RouteMatch] = {}
+        for episode in rec.episodes:
+            result = route(episode.transcript(rec.transcript), self.cfg, local_only=local_only)
+            episode.routes = result.matches
+            rec.total_cost_usd += result.cost_usd
+            for match in result.matches:
+                current = best.get(match.profile_id)
+                if current is None or match.confidence > current.confidence:
+                    best[match.profile_id] = match
+
+        rec.routes = sorted(best.values(), key=lambda m: -m.confidence)
         rec.stage = Stage.ROUTED
         self.db.audit(
             "route",
-            ", ".join(f"{r.profile_id}={r.confidence:.2f}" for r in rec.routes),
+            f"{len(rec.episodes)} episode(s); "
+            + ", ".join(f"{r.profile_id}={r.confidence:.2f}" for r in rec.routes),
             rec.id,
         )
 
@@ -305,18 +369,27 @@ class Pipeline:
         local_only = rec.compliance.force_local_processing or governing.hard_local_only \
             or not governing.allow_cloud_llm
 
-        body = rec.transcript.labelled_text()
-        redacted, counts = self.gate.redact_for_llm(body, governing)
-        for name, count in counts.items():
-            rec.compliance.redactions[name] = rec.compliance.redactions.get(name, 0) + count
-
         for match in rec.routes:
             if match.profile_id not in self.cfg.profiles:
                 continue
             profile = self.cfg.profile(match.profile_id)
 
+            # Each profile is analysed from ITS OWN episodes, not from the whole
+            # recording. This is what makes a full day produce a rundown per
+            # profile: the Insurance Agent analysis sees the client calls and
+            # nothing else, and it also keeps each call comfortably inside the
+            # extraction budget instead of truncating the day at two hours.
+            portion = transcript_for(match.profile_id, rec.episodes, rec.transcript)
+            if not portion.segments:
+                portion = rec.transcript
+
+            body = portion.labelled_text()
+            redacted, counts = self.gate.redact_for_llm(body, governing)
+            for name, count in counts.items():
+                rec.compliance.redactions[name] = rec.compliance.redactions.get(name, 0) + count
+
             analysis: ProfileAnalysis = extract(
-                rec.transcript, profile, self.cfg, redacted, local_only=local_only
+                portion, profile, self.cfg, redacted, local_only=local_only
             )
             rec.analyses.append(analysis)
             rec.total_cost_usd += analysis.cost_usd
@@ -332,7 +405,9 @@ class Pipeline:
     # ---- persistence ----------------------------------------------------
     def _persist(self, rec: Recording) -> None:
         governing = self.cfg.profile(rec.compliance.governing_profile or "unfiled")
-        encrypt = governing.encrypt_at_rest
+        # Read the gate's verdict rather than re-deriving it, so this and the
+        # index always agree. See models.Recording.is_encrypted.
+        encrypt = rec.is_encrypted
         day = (rec.recorded_at or rec.ingested_at).strftime("%Y/%m/%d")
         stem = f"{day}/{rec.id}"
 
@@ -436,26 +511,66 @@ class Pipeline:
         or `raw_audio_days` describes a sweep that never happens -- audio would
         be the one thing that never expires, which is exactly backwards.
         """
-        archive = self.cfg.path("inbox") / "_processed"
-        archive.mkdir(parents=True, exist_ok=True)
-        dest = archive / f"{rec.id}_{path.name}"
-        try:
-            shutil.move(str(path), str(dest))
-        except (OSError, shutil.Error) as exc:
-            log.warning("could not archive %s: %s", path.name, exc)
-            return
-
-        if rec.kind != "audio":
-            return
-
         governing = self.cfg.profile(
             rec.compliance.governing_profile or self.cfg.get("routing.fallback_profile", "unfiled")
         )
-        rec.artifact_paths["audio"] = str(dest)
+        encrypt = rec.is_encrypted and bool(
+            self.cfg.get("ingest.encrypt_archived_audio", True)
+        )
+
+        if encrypt:
+            # The original recording is the most sensitive artifact there is --
+            # it is the actual voices. Leaving it in a predictable folder in the
+            # clear while the transcript derived from it sits encrypted beside
+            # it made the vault theatre.
+            #
+            # Streamed, a chunk at a time. A day of audio is several hundred
+            # megabytes and the one-shot path needs the plaintext and the
+            # ciphertext resident at once, which is how encrypting your longest
+            # recording became the thing that ran the machine out of memory.
+            day = (rec.recorded_at or rec.ingested_at).strftime("%Y/%m/%d")
+            try:
+                stored = self.vault.write_stream(
+                    f"{day}/{rec.id}.source{path.suffix.lower()}", path, rec.id
+                )
+                path.unlink()
+            except (VaultError, OSError, MemoryError) as exc:
+                # Do not silently fall back to leaving it in the clear. Say so.
+                log.error(
+                    "could not encrypt the original of %s (%s). It has been left in "
+                    "the inbox unencrypted; move or delete it yourself.", path.name, exc,
+                )
+                self.db.audit(
+                    "archive_unencrypted",
+                    f"{path.name}: {exc}. Original left in the inbox in plaintext.",
+                    rec.id,
+                )
+                return
+            dest = stored
+        else:
+            archive = self.cfg.path("inbox") / "_processed"
+            archive.mkdir(parents=True, exist_ok=True)
+            # The archive is flat while the inbox is scanned recursively, so two
+            # files named recording.wav in different subfolders would collide and
+            # shutil.move would overwrite one without an error.
+            dest = archive / f"{rec.id}_{path.name}"
+            try:
+                shutil.move(str(path), str(dest))
+            except (OSError, shutil.Error) as exc:
+                log.warning("could not archive %s: %s", path.name, exc)
+                return
+
+        # Index it whatever it was. Skipping text imports here left an encrypted
+        # copy of the source in the vault that nothing pointed at and no sweep
+        # would ever expire -- an orphan holding the same words as the
+        # transcript. Both kinds are "the file you gave me" and both expire on
+        # the raw-audio clock, which is the shorter one.
+        kind = "audio" if rec.kind == "audio" else "source"
+        rec.artifact_paths[kind] = str(dest)
         self.db.upsert(rec)
         self.db.record_artifact(
-            rec.id, "audio", str(dest), False,
-            self.retention.expires_at("audio", governing, rec.recorded_at or rec.ingested_at),
+            rec.id, kind, str(dest), encrypt,
+            self.retention.expires_at(kind, governing, rec.recorded_at or rec.ingested_at),
         )
 
     # =====================================================================
@@ -468,7 +583,12 @@ class Pipeline:
             files = files[:limit]
 
         if not files:
-            log.info("inbox is empty: %s", self.cfg.path("inbox"))
+            skipped = len(self.unsettled) + len(self.unsupported) + len(self.oversize)
+            if skipped:
+                log.info("nothing to process in %s: %d file(s) present but skipped",
+                         self.cfg.path("inbox"), skipped)
+            else:
+                log.info("inbox is empty: %s", self.cfg.path("inbox"))
             return stats
 
         log.info("found %d file(s) to process", len(files))
@@ -515,6 +635,23 @@ _NOT_A_SPEAKER = frozenset({
 })
 
 WORDS_PER_SECOND = 2.6
+
+# Characters that occupy a string without being speech: byte order marks,
+# zero-width joiners and spaces, and the various invisible formatting marks
+# that survive a copy-paste out of a word processor.
+INVISIBLE = "﻿​‌‍⁠­￼�"
+
+
+def _has_speech(segments) -> bool:
+    """
+    Whether a parsed transcript holds anything anyone actually said.
+
+    Segments can exist and still be empty: a file of whitespace or invisible
+    characters parses into shapes that carry no text. Treating those as a
+    recording spends an LLM call on silence and puts a phantom entry in every
+    digest from then on.
+    """
+    return any((s.text or "").strip().strip(INVISIBLE).strip() for s in segments)
 
 
 def _speaker_split(line: str) -> tuple[str, str] | None:

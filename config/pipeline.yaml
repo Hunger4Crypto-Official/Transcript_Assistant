@@ -31,8 +31,23 @@ ingest:
   dedupe: true
   # Move originals out of inbox after successful processing.
   archive_originals: true
-  # Refuse files larger than this (guards against accidental 10-hour dumps).
-  max_file_mb: 512
+  # The original recording is the actual voices, which makes it the most
+  # sensitive artifact of the lot. When the governing profile encrypts at rest,
+  # the original goes into the vault rather than sitting in _processed/ in the
+  # clear. Get it back with: run.py open <id> --kind audio --out file.mp3
+  # Encrypted a chunk at a time, so a full day of audio never has to be resident
+  # in memory.
+  encrypt_archived_audio: true
+  # Skip files modified in the last N seconds. A large recording still being
+  # copied into the inbox would otherwise be ingested half-written, and the
+  # content hash of the partial file is what gets deduped forever after.
+  settle_seconds: 5
+  # Refuse files larger than this. A full working day is the design point now:
+  # roughly 450MB as 128kbps mp3, more at higher bitrates, and the normalised
+  # WAV that ffmpeg writes to scratch is around 115MB per hour on top of that.
+  # Originals are encrypted a chunk at a time, so this is a disk budget rather
+  # than a memory one.
+  max_file_mb: 2048
 
 audio:
   # ffmpeg must be on PATH.
@@ -212,3 +227,56 @@ logging:
   redact_content: true
   rotate_mb: 20
   backups: 5
+
+voice:
+  # Which voice pack in config/voice/ supplies the digest wording.
+  #   plain  - neutral and factual (default)
+  #   brief  - short and scannable, for reading on a phone
+  #   warm   - written like a person assembled it; suits the personal profiles
+  # `run.py voices` lists what is installed.
+  preset: "plain"
+  # Override individual strings without copying a whole pack. Same shape as the
+  # pack files, merged on top of the chosen preset.
+  overrides: {}
+    # digest:
+    #   needs_you:
+    #     heading: "Before You Do Anything Else"
+
+episodes:
+  # A day is not one conversation. Long recordings are cut into episodes, each
+  # routed on its own, so every profile gets a rundown built only from the parts
+  # of the day that belong to it.
+  enabled: true
+  # Recordings shorter than this are treated as one conversation. Cutting a
+  # twenty minute client call into pieces multiplies the routing cost for
+  # nothing.
+  skip_below_seconds: 900
+  # Boundary signals, strongest first. A gap this long means people left.
+  silence_gap_seconds: 45
+  # How much the set of speakers has to change to count as a new conversation.
+  speaker_change_above: 0.6
+  # Vocabulary overlap between the window before and after a candidate point.
+  # Below this and the subject has changed.
+  topic_overlap_below: 0.08
+  comparison_window_segments: 12
+  # An episode shorter than this is a fragment and gets folded into its
+  # neighbour; one longer than this is split regardless of coherence.
+  min_seconds: 120
+  max_seconds: 1800
+  # Each episode costs one routing call. This caps a pathological day.
+  max_per_recording: 40
+
+runtime:
+  # Offline is an assertion, not a preference. Turn this on and the config
+  # refuses to load while any cloud provider is enabled, every model must
+  # already be on disk, and the ASR and diarization backends are told never to
+  # reach for a download.
+  #
+  # To set up an air-gapped machine, on a networked one first:
+  #   python scripts/fetch_models.py --all
+  # then copy models/ and wheels/ across, and:
+  #   pip install --no-index --find-links wheels -e .
+  #   python run.py doctor --offline
+  offline: false
+  # Where local model weights live. Relative paths resolve against the project.
+  models_dir: "./models"

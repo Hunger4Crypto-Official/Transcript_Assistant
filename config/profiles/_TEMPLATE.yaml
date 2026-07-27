@@ -1,0 +1,146 @@
+# =============================================================================
+# Profile template
+# =============================================================================
+# Files starting with an underscore are ignored by the loader, so this one sits
+# here safely as a reference. To make a real profile:
+#
+#     python run.py new-profile mentor --name "Mentor" --heading "Mentorship"
+#
+# which writes a copy of this file with the ids filled in. Or copy it by hand;
+# the filename stem and the `id` field have to match.
+#
+# Then: python run.py profiles     to confirm it loaded
+#       python run.py doctor       to confirm nothing else broke
+#
+# Every key below is documented. Delete what you do not need -- most have
+# defaults -- but read the sensitivity and processing sections before you do.
+# =============================================================================
+
+id: "PROFILE_ID"                  # must equal the filename stem, a valid identifier
+name: "Profile Name"              # shown in `profiles`, `status`, and digest titles
+short_name: "Short"               # used by voice packs that prefer a compact title
+icon: "circle"                    # cosmetic, for anything you build on top of this
+description: >
+  One paragraph. What kind of recording belongs here and why the profile exists.
+  Written for you in six months, not for a stranger.
+
+# ---------------------------------------------------------------------------
+# Sensitivity drives the defaults for encryption and, through the compliance
+# gate, which profile governs when several match on one recording.
+#   low | medium | high | maximum
+# The strictest matched profile governs the WHOLE recording. See GOVERNANCE
+# ADR-002 before assuming a mixed recording will be treated leniently.
+# ---------------------------------------------------------------------------
+sensitivity: "high"
+
+processing:
+  # Cloud transcription. Remember that ASR runs before anything is known about
+  # the content, so cloud ASR is opt-in per FILE (name the file after this
+  # profile) and never the default. See GOVERNANCE ADR-005.
+  allow_cloud_asr: false
+  # Cloud analysis. If ANY profile matching a recording forbids this, the whole
+  # recording is analysed locally.
+  allow_cloud_llm: false
+  # Require a spoken consent announcement plus agreement in the opening window.
+  # When it is missing the recording is quarantined rather than analysed.
+  require_consent: false
+  # Defaults to true at high and maximum sensitivity.
+  encrypt_at_rest: true
+  # Apply compliance.redact_patterns before any model sees the transcript.
+  redact_before_llm: true
+
+# ---------------------------------------------------------------------------
+# Optional. A hard lock cannot be undone by editing the flags above.
+# Profiles listed in CODE_ENFORCED_LOCAL_ONLY (config.py) get this whether they
+# ask for it or not, and adding one there requires a commit.
+# ---------------------------------------------------------------------------
+# hard_lock:
+#   local_processing_only: true
+#   reason: "Say why. Future you will want the reasoning, not just the flag."
+
+# ---------------------------------------------------------------------------
+# Optional. A named boolean that must be true or the profile refuses to
+# process. Use it for a standing agreement rather than a per-recording one.
+# Any block named family_consent or spousal_consent is picked up automatically.
+# ---------------------------------------------------------------------------
+# family_consent:
+#   everyone_knows_device_records: true
+#   reaffirm_every_days: 30        # `run.py review` prompts you to reconfirm
+
+retention:
+  # Transcripts are cheap to keep. Audio is the liability. Expiry runs from
+  # when the recording was MADE, not when you processed it.
+  transcript_days: 365
+  raw_audio_days: 90
+  audit_log_days: 730
+
+routing:
+  # A recording scoring below this is not filed here. Routing is multi-label:
+  # clearing the bar here does not exclude it from anywhere else.
+  min_confidence: 0.55
+  # The cheap first pass. Distinct terms matter more than repetition, so a
+  # broad list of specific words beats a short list of common ones.
+  keywords: []
+  # Terms that argue against this profile. Each occurrence subtracts.
+  negative_keywords: []
+  # Shown to the router alongside the keyword score. Write it as an instruction
+  # to someone deciding, and say what does NOT belong here as well as what does.
+  llm_hint: >
+    Route here when ... Do not route here merely because ...
+
+extraction:
+  # Optional. Narrows the house style in config/voice/*.yaml for this profile
+  # only. Register and stance, not rules -- put rules in system_prompt.
+  persona: >
+    ...
+
+  # The rules. This is nearest the task in the assembled prompt and cannot be
+  # softened by the house style or the persona. Put hard constraints here.
+  system_prompt: >
+    You are ...
+
+    HARD CONSTRAINTS. You must follow all of these:
+    - Do NOT ...
+
+  # The schema. Adding a field here is the whole change; no code edit.
+  # types: string | boolean | number | list[string] | list[quote] | list[object]
+  #   list[quote]  -> [{"timestamp": "MM:SS", "speaker": "...", "text": "..."}]
+  #   list[object] -> free-shaped dicts, rendered as key: value pairs
+  # priority: normal | high | critical  (marks the field in the prompt)
+  fields:
+    - key: "topic"
+      label: "Topic"
+      type: "string"
+      description: "One sentence describing what this recording is."
+
+    # A field named requires_human_attention is special: when the model sets it
+    # true, every other field is discarded and the digest tells you to read the
+    # recording yourself. Use it for anything you do not want summarised.
+    # - key: "requires_human_attention"
+    #   label: "Requires Human Attention"
+    #   type: "boolean"
+    #   description: "True only if this should be read by a person, not summarised."
+    #   priority: "critical"
+
+    # Every profile should end with this one. The digest lifts next_action from
+    # every section into "Needs You" at the top.
+    - key: "next_action"
+      label: "Next Action"
+      type: "string"
+      description: "The one thing you should not let slide, or 'none'."
+
+digest:
+  heading: "Section Heading"       # how this profile appears in the digest
+  priority: 5                      # lower sorts first
+  intro: ""                        # optional line under the section heading
+  empty: ""                        # optional wording when the window is empty
+  # Which fields render, in this order. Empty means all of them.
+  highlight_fields: []
+  # Fields that NEVER render to markdown. They stay in the encrypted analysis
+  # and the digest reports only how many exist. For anything you need to know
+  # about but do not want printed in a document you might read on a plane.
+  suppress_fields: []
+  # Keep this profile out of the combined digest unless explicitly asked for.
+  # Set true for anything personal: the combined digest is the document most
+  # likely to be forwarded or opened on a shared screen.
+  exclude_from_combined_export: false

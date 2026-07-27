@@ -16,7 +16,10 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+from .logging_setup import get
 from .models import Recording
+
+log = get("db")
 
 SCHEMA_VERSION = 1
 
@@ -156,6 +159,20 @@ class Database:
             include_transcript=not encrypted,
             include_analysis_fields=not encrypted,
         )
+        try:
+            self._upsert(rec, payload, encrypted)
+        except sqlite3.IntegrityError as exc:
+            # content_hash is UNIQUE. Two processes -- a `watch` loop and a
+            # manual `run`, say -- can both pass the dedupe check for the same
+            # file before either writes. The other one won the race and the
+            # recording is already indexed; that is a duplicate, not a failure,
+            # and it should not be reported to the user as a broken recording.
+            log.warning(
+                "not indexing %s: another process already recorded this content (%s)",
+                rec.source_name, exc,
+            )
+
+    def _upsert(self, rec: Recording, payload: str, encrypted: bool) -> None:
         with self.tx() as cur:
             cur.execute(
                 """
@@ -278,8 +295,13 @@ class Database:
             sql.append("AND r.stage = ?")
             params.append(stage)
         if search:
-            sql.append("AND r.source_name LIKE ?")
-            params.append(f"%{search}%")
+            # Escape LIKE's own wildcards. Without this, searching for a
+            # filename containing "_" matches any character and "%" matches
+            # everything, so the results quietly include things you did not ask
+            # for -- and "100%.mp3" matches every file you own.
+            escaped = search.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            sql.append("AND r.source_name LIKE ? ESCAPE '\\'")
+            params.append(f"%{escaped}%")
         sql.append("ORDER BY COALESCE(r.recorded_at, r.ingested_at) DESC LIMIT ?")
         params.append(limit)
 
@@ -321,6 +343,55 @@ class Database:
                 (now.isoformat(),),
             )
             return [dict(r) for r in cur.fetchall()]
+
+    def count_recordings(self, profile_id: str | None = None,
+                         since_days: int | None = None) -> int:
+        """How many rows a query would match, before any limit is applied."""
+        sql = ["SELECT COUNT(DISTINCT r.id) c FROM recordings r"]
+        params: list[Any] = []
+        if profile_id:
+            sql.append("JOIN routes rt ON rt.recording_id = r.id")
+        sql.append("WHERE 1=1")
+        if profile_id:
+            sql.append("AND rt.profile_id = ?")
+            params.append(profile_id)
+        if since_days is not None:
+            cutoff = (datetime.now(timezone.utc) - timedelta(days=since_days)).isoformat()
+            sql.append("AND COALESCE(r.recorded_at, r.ingested_at) >= ?")
+            params.append(cutoff)
+        with self.tx() as cur:
+            cur.execute(" ".join(sql), params)
+            return int(cur.fetchone()["c"])
+
+    def count_audit_before(self, cutoff: datetime) -> int:
+        with self.tx() as cur:
+            cur.execute("SELECT COUNT(*) c FROM audit WHERE at < ?", (cutoff.isoformat(),))
+            return int(cur.fetchone()["c"])
+
+    def delete_audit_before(self, cutoff: datetime | None) -> int:
+        """Trim the audit trail. Refuses an open-ended cutoff."""
+        if cutoff is None:
+            return 0
+        with self.tx() as cur:
+            cur.execute("DELETE FROM audit WHERE at < ?", (cutoff.isoformat(),))
+            return cur.rowcount
+
+    def all_artifacts(self) -> list[dict[str, Any]]:
+        with self.tx() as cur:
+            cur.execute("SELECT * FROM artifacts ORDER BY recording_id, kind")
+            return [dict(r) for r in cur.fetchall()]
+
+    def delete_recording(self, recording_id: str) -> None:
+        """
+        Remove a recording and everything the index knows about it.
+
+        The audit rows are left alone on purpose. They carry no foreign key, so
+        they survive, and they should: "this recording was deleted, by a human,
+        at this time" is exactly the kind of thing an audit trail exists to
+        record. A trail that forgets deletions is not a trail.
+        """
+        with self.tx() as cur:
+            cur.execute("DELETE FROM recordings WHERE id=?", (recording_id,))
 
     def drop_artifact(self, recording_id: str, kind: str) -> None:
         with self.tx() as cur:

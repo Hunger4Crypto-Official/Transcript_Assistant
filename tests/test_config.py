@@ -91,3 +91,75 @@ def test_strictest_profile_wins():
 def test_sensitivity_ordering():
     ranks = [Sensitivity.LOW, Sensitivity.MEDIUM, Sensitivity.HIGH, Sensitivity.MAXIMUM]
     assert [s.rank for s in ranks] == sorted(s.rank for s in ranks)
+
+
+# =========================================================================
+# Hand-edited files
+#
+# Every one of these is a file a person opens in an editor, so every one of
+# them will eventually be saved broken. The requirement is not that it works,
+# it is that the failure names the file and says what is wrong with it — a
+# traceback from inside the YAML parser tells you nothing you can act on.
+# =========================================================================
+BROKEN = [
+    ("does not parse", "this: [is: broken"),
+    ("is a list", "- a\n- b\n"),
+    ("is a bare string", "just some text\n"),
+    ("is a number", "42\n"),
+    ("uses tabs", "paths:\n\tinbox: x\n"),
+]
+
+
+@pytest.mark.parametrize("label,body", BROKEN, ids=[b[0] for b in BROKEN])
+def test_a_broken_pipeline_yaml_names_itself(tmp_path, label, body):
+    import shutil
+
+    shutil.copytree(ROOT / "config", tmp_path / "config")
+    (tmp_path / "config" / "pipeline.yaml").write_text(body)
+
+    with pytest.raises(ConfigError) as excinfo:
+        Config.load(tmp_path / "config")
+    assert "pipeline.yaml" in str(excinfo.value), str(excinfo.value)
+
+
+@pytest.mark.parametrize("label,body", BROKEN, ids=[b[0] for b in BROKEN])
+def test_a_broken_profile_names_itself(tmp_path, label, body):
+    import shutil
+
+    shutil.copytree(ROOT / "config", tmp_path / "config")
+    (tmp_path / "config" / "profiles" / "father.yaml").write_text(body)
+
+    with pytest.raises(ConfigError) as excinfo:
+        Config.load(tmp_path / "config")
+    assert "father.yaml" in str(excinfo.value), str(excinfo.value)
+
+
+@pytest.mark.parametrize("label,body", BROKEN, ids=[b[0] for b in BROKEN])
+def test_a_broken_glossary_names_itself(tmp_path, label, body):
+    """The glossary is optional, which is not the same as ignorable."""
+    import shutil
+
+    shutil.copytree(ROOT / "config", tmp_path / "config")
+    (tmp_path / "config" / "glossary.yaml").write_text(body)
+
+    with pytest.raises(ConfigError) as excinfo:
+        Config.load(tmp_path / "config")
+    assert "glossary.yaml" in str(excinfo.value), str(excinfo.value)
+
+
+def test_an_empty_config_file_is_not_a_crash(tmp_path):
+    """An empty file is a mapping with nothing in it, not a type error."""
+    import shutil
+
+    shutil.copytree(ROOT / "config", tmp_path / "config")
+    (tmp_path / "config" / "glossary.yaml").write_text("")
+    cfg = Config.load(tmp_path / "config")
+    assert cfg.glossary.corrections == {}
+
+
+def test_a_missing_glossary_is_fine(tmp_path):
+    import shutil
+
+    shutil.copytree(ROOT / "config", tmp_path / "config")
+    (tmp_path / "config" / "glossary.yaml").unlink()
+    assert Config.load(tmp_path / "config").glossary.corrections == {}

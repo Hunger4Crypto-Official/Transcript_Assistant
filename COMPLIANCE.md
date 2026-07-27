@@ -171,8 +171,9 @@ megabytes. Ten years of audio costs you a discovery request.
 Retention runs from when the conversation happened, not from when you processed
 it. Importing a three-year-old backlog does not reset the clock on any of it.
 
-The original audio is moved to `data/inbox/_processed/` after a successful run
-and swept on the `Raw audio` row above. If you disable
+The original is swept on the `Raw audio` row above, whether it was audio or an
+imported transcript. For profiles that encrypt at rest it lives in the vault;
+for the rest it moves to `data/inbox/_processed/`. If you disable
 `ingest.archive_originals`, the file stays where you left it and nothing expires
 it — retention only sweeps what it has indexed.
 
@@ -227,6 +228,12 @@ If encryption is unavailable, the pipeline **refuses to write** rather than
 falling back to plaintext. You will notice a crash. You would not notice a quiet
 plaintext write.
 
+The original recording goes into the vault too. It is the actual voices, which
+makes it the most sensitive artifact of the lot; leaving it in `_processed/` in
+the clear while the transcript sat encrypted beside it made the vault
+decorative. Get one back with `run.py open <id> --kind audio --out file.mp3`,
+and delete the copy when you are done with it.
+
 The SQLite index at `data/bridge.db` is an ordinary file, so it holds no
 plaintext either. For an encrypted recording it stores metadata — dates,
 duration, profile, consent status, cost — and marks the transcript and the
@@ -242,6 +249,11 @@ cannot get it rather than rendering an empty one.
 Every ingest, ASR locality decision, route, compliance decision, quarantine,
 release, and retention deletion is written to the `audit` table with a UTC
 timestamp. Releases from quarantine are marked `actor=human`.
+
+The trail is swept on the longest `audit_log_days` any profile asks for -- 7
+years with the shipped config. An audit row is not owned by one profile, so the
+longest window is the only reading that never deletes a record something else
+still needs. `run.py retention` shows the count before you execute it.
 
 Read it:
 

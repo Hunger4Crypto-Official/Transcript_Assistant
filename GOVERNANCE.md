@@ -256,6 +256,146 @@ than a visible zero, because the zero is at least honest about not knowing.
 
 ---
 
+## ADR-015: Voice is config; structure is code
+
+**Decision.** Every user-facing string in the digest comes from a voice pack in
+`config/voice/`. What renders, in what order, and under what conditions stays in
+`digest/builder.py`. There is no template language and packs cannot introduce
+control flow.
+
+**Why not a real template engine.** The digest is the document most likely to be
+forwarded, pasted into a message, or opened on a shared screen, and its renderer
+is where three compliance rules are enforced: suppressed fields never print,
+personal profiles are omitted from the combined view, and encrypted analyses are
+decrypted on demand rather than mirrored into the index. A template able to
+reorder or re-emit sections is a template able to defeat all three. Trading that
+for layout flexibility is a bad trade in this specific document.
+
+**Why it cannot fail.** `voice.py` carries the complete default set, and a pack
+is a deep merge over it. A partial pack is valid, a missing pack falls back with
+a warning, a corrupt pack falls back with a warning, and an unknown placeholder
+renders empty. A typo in a voice file should make the digest look slightly
+wrong, never lose you the digest.
+
+**Where.** `voice.py`, `config/voice/*.yaml`, and per-profile `digest.intro`,
+`digest.empty`, `extraction.persona`. Pinned by
+`tests/test_voice_and_templates.py`, including a test that an override cannot
+print a suppressed field.
+
+---
+
+## ADR-016: Prompt layering puts the constraints last
+
+**Decision.** An extraction prompt is assembled in three layers: the voice
+pack's `analysis.house_style`, then the profile's `extraction.persona`, then the
+profile's `extraction.system_prompt`.
+
+**Why that order.** The hard constraints on the family profiles — no
+psychological assessment of a child, no fault-finding in a marital
+disagreement — live in `system_prompt`. Putting them last places them nearest
+the task and means nothing configured above can dilute them. House style and
+persona set register; they are not allowed to argue with a rule.
+
+**If you add a layer**, add it above, not below.
+
+---
+
+## ADR-017: One decryption path
+
+**Decision.** Everything that reads stored content back — content search,
+verification, export, deletion — goes through `archive.py`. The digest is the
+one exception and it is on the list to fold in.
+
+**Why.** A recording's words live in one of two places depending on its
+governing profile: in the SQLite payload when it is not encrypted, and only in
+the vault when it is (ADR-013). Every reader has to know that rule. Four copies
+of it is four chances for one to forget the encrypted case and silently return
+nothing, which reads to the user as "that was never said".
+
+**The rule for readers.** Under-reporting is worse than failing. `search_content`
+returns matches *and* a list of what it could not open, and the command exits
+non-zero when that list is non-empty. `verify` marks a locked vault's artifacts
+as `unchecked` rather than omitting them, because reporting "0 artifacts
+indexed" when there are twelve is how someone concludes an archive is fine when
+nothing was looked at.
+
+---
+
+## ADR-018: Deletion is a first-class operation, and the audit survives it
+
+**Decision.** `forget <id>` removes the vault artifacts, outbox files, archived
+original, quarantine folder, and index row for one recording. The audit entries
+for that recording stay.
+
+**Why deletion at all.** Retention sweeps on a schedule; that is not the same as
+being able to remove one specific conversation because someone asked you to, or
+because it should never have been recorded. Without this the only way to delete
+a single recording was hand-editing SQLite, which nobody does correctly at 11pm.
+
+**Why the audit stays.** The `audit` table deliberately has no foreign key onto
+`recordings`, so rows survive the delete. "This recording was deleted, by a
+human, at this time" is exactly what an audit trail is for. A trail that forgets
+deletions is not a trail. The entry is written *before* the files are removed,
+so a crash halfway through still leaves evidence.
+
+---
+
+## ADR-019: Unsafe defaults are the ones that ship
+
+**Decision.** `ComplianceVerdict.encrypt_at_rest` defaults to `True`. A
+recording is treated as needing encryption until a profile says otherwise.
+
+**Why.** The verdict is only filled in once the gate has run, and a recording
+can fail before that — a provider outage, a malformed profile, a bug. With the
+old `False` default, that path wrote the complete plaintext transcript of a
+family conversation into `bridge.db` and left it there permanently. Nothing
+raised. The run reported `failed=1` and looked like a normal bad day.
+
+**The general rule.** When a flag governs whether content may sit in the clear,
+the default is the safe one, and the unsafe value is set explicitly by the code
+that has actually established it is safe. Any default is a decision about what
+happens on the paths nobody thought about.
+
+**Related.** `is_encrypted` now reads that single field. It used to be derived
+from sensitivity while persistence used the profile's `encrypt_at_rest` flag —
+two sources of truth for one question, which a perfectly legal profile (high
+sensitivity, encryption off) made disagree.
+
+---
+
+## ADR-020: Destructive operations are bounded to our own directories
+
+**Decision.** `forget` and the retention sweep resolve every candidate path and
+refuse anything outside the configured `vault`, `outbox`, `inbox`, `quarantine`,
+and `work` directories. Refusals are logged, audited, and reported.
+
+**Why.** Deletion targets come from the index, and the index is a file. It can
+be restored from a backup taken when paths meant something else, hand-edited, or
+corrupted. Before this, `retention --execute` would unlink whatever it was told
+to. Verified: a row pointing at an unrelated PDF outside the data directory
+deleted the PDF.
+
+**Cost.** A legitimately relocated data directory now needs the index updated
+rather than silently following the old paths. That is the right way round.
+
+---
+
+## ADR-021: A search that did not look must not report a result
+
+**Decision.** `search_content` returns what it scanned, what it skipped, and
+what would not open. The command exits non-zero when the answer is incomplete,
+and scans everything by default.
+
+**Why.** The CLI's `--limit` reads as "how many results to show" and was being
+handed to the row query as "how many recordings to open". An archive of 60
+recordings had 10 searched and 50 silently excluded, and the command printed
+*nothing matching "elimination period" was said*. The phrase was in the archive.
+
+A tool that answers "that never happened" when it means "I did not look" is
+worse than one with no search at all, because you believe it.
+
+---
+
 ## Known limitations
 
 1. **Crosstalk breaks diarization.** When two people talk over each other,

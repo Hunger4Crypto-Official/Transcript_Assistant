@@ -29,6 +29,12 @@ routing:
   llm_hint: "Fallback only. Never selected directly by the router."
 
 extraction:
+  persona: >
+    You are triaging, not analysing. Say what the recording is in one plain
+    sentence and suggest where it should have gone. Being useful here means
+    being fast and specific about the terms that would have routed it correctly,
+    so that this section shrinks over time.
+
   system_prompt: >
     Summarise what this recording is about in plain language. Extract any
     commitments, dates, or action items. Do not speculate about context you
@@ -58,5 +64,12 @@ extraction:
 digest:
   heading: "Unfiled"
   priority: 9
+  intro: >
+    Everything the router could not place. Read this monthly and harvest the
+    keywords -- `run.py review` collects the suggestions for you. A section that
+    never shrinks means the profiles are missing vocabulary, not that the router
+    is broken.
+  empty: >
+    The router placed everything this window.
   highlight_fields: ["topic", "suggested_profile"]
   suppress_fields: []
