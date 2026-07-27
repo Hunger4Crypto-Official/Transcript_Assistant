@@ -8,6 +8,7 @@ Plaud Bridge command line.
     plaud-bridge digest                        combined digest, last 7 days
     plaud-bridge digest --format html          self-contained page, prints cleanly
     plaud-bridge review                        what the review cadence says is due
+    plaud-bridge followups                     commitments still open, oldest first
     plaud-bridge status                        index summary
     plaud-bridge search "own occupation" --content    search what was actually said
     plaud-bridge open <recording_id>           decrypt and print an artifact
@@ -40,6 +41,7 @@ from .compliance import RetentionSweeper
 from .config import Config, ConfigError
 from .db import Database
 from .digest import DigestBuilder, DigestOptions, fmt_value, to_html
+from .followups import FollowUpError, collect, draft, render, set_status
 from .logging_setup import setup
 from .models import format_stamp
 from .pipeline import Pipeline
@@ -309,6 +311,76 @@ def cmd_digest(args) -> int:
         else:
             body = markdown
 
+        if args.out:
+            dest = Path(args.out)
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_text(body, encoding="utf-8")
+            print(f"wrote {dest}")
+        else:
+            print(body)
+        return 0
+    finally:
+        db.close()
+
+
+def cmd_followups(args) -> int:
+    """
+    Commitments across every recording, and drafts for the ones you chase.
+
+    Nothing here sends anything. `--draft` writes a file into the outbox for
+    you to read, edit, and send from your own mail client, which is the whole
+    difference between this and the feature it replaces.
+    """
+    cfg = _load(args)
+    db = Database(cfg.path("database"))
+    try:
+        archive = Archive(cfg, db)
+        try:
+            items = collect(
+                cfg, db, archive,
+                profile=args.profile,
+                days=args.days,
+                status=None if args.status == "all" else args.status,
+                include_personal=args.include_personal,
+                vault=archive.vault,
+            )
+
+            for followup_id, status in ((args.done, "done"), (args.drop, "dropped"),
+                                        (args.reopen, "open")):
+                if not followup_id:
+                    continue
+                updated = set_status(cfg, archive.vault, followup_id, status, items=items)
+                print(f"{updated.id} is now {status}"
+                      + (f": {updated.text}" if updated.text else ""))
+                return 0
+
+            if args.draft:
+                # A recording id drafts everything that recording still owes,
+                # a follow-up id drafts one thing, and 'open' drafts the lot.
+                if args.draft.startswith("rec_"):
+                    target = args.draft
+                elif args.draft == "open":
+                    target = [i for i in items if i.is_open]
+                else:
+                    target = [i for i in items if i.id.startswith(args.draft)]
+                    if not target:
+                        print(f"no follow-up here starts with '{args.draft}'")
+                        return 1
+                path = draft(
+                    target, cfg, db=db, archive=archive, vault=archive.vault,
+                    out=args.out, fmt="text" if args.format == "text" else "markdown",
+                    include_personal=args.include_personal,
+                )
+                print(f"\nwrote {path}")
+                print("That is a draft. Nothing has been sent, and this tool has no "
+                      "way to send it. Read it, fix it, and send it yourself.\n")
+                return 0
+        except FollowUpError as exc:
+            print(f"\n{exc}\n", file=sys.stderr)
+            return 1
+
+        body = render(items, fmt="html" if args.format == "html" else "markdown",
+                      title=args.title or None)
         if args.out:
             dest = Path(args.out)
             dest.parent.mkdir(parents=True, exist_ok=True)
@@ -1232,6 +1304,30 @@ def build_parser() -> argparse.ArgumentParser:
                    help="html is self-contained and prints cleanly")
     p.add_argument("--title", default=None)
     p.set_defaults(func=cmd_digest)
+
+    p = sub.add_parser("followups",
+                       help="commitments still open, and drafts you send yourself")
+    p.add_argument("--profile", default=None, help="filter to one profile id")
+    p.add_argument("--days", type=int, default=None,
+                   help="lookback window. The default is everything: a promise does "
+                        "not stop counting because it is old.")
+    p.add_argument("--status", default="open",
+                   choices=["open", "done", "dropped", "all"],
+                   help="which follow-ups to show (default: open)")
+    p.add_argument("--include-personal", action="store_true",
+                   help="include father/husband, in the list and in drafts")
+    p.add_argument("--done", default=None, metavar="ID", help="mark one follow-up done")
+    p.add_argument("--drop", default=None, metavar="ID", help="mark one as dropped")
+    p.add_argument("--reopen", default=None, metavar="ID", help="mark one open again")
+    p.add_argument("--draft", default=None, metavar="ID",
+                   help="write a draft into the outbox: a follow-up id, a recording "
+                        "id, or 'open' for everything outstanding. Nothing is sent.")
+    p.add_argument("--format", default="markdown",
+                   choices=["markdown", "html", "text"],
+                   help="html for the worklist, text for a plain-text draft")
+    p.add_argument("--out", default=None, help="write to a file instead of stdout")
+    p.add_argument("--title", default=None)
+    p.set_defaults(func=cmd_followups)
 
     p = sub.add_parser("status", help="index summary")
     p.set_defaults(func=cmd_status)

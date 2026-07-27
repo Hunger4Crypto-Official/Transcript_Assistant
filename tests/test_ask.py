@@ -22,7 +22,6 @@ from pathlib import Path
 import pytest
 
 from _fixtures import build_sandbox
-from plaud_bridge import ask as ask_mod
 from plaud_bridge.archive import Archive
 from plaud_bridge.ask import Answer, ask, question_terms, retrieve, save_answer
 from plaud_bridge.db import Database
@@ -231,8 +230,11 @@ def test_retrieval_ranks_term_overlap_above_recency(bridge):
     assert new in ids, "the weaker match should still be a candidate, just lower"
 
 
-def test_retrieval_breaks_score_ties_with_recency(bridge):
-    """Identical content, different dates. The newer one has to come first."""
+def test_recency_orders_two_equally_relevant_recordings(bridge):
+    """
+    Identical content, different dates. The newer one has to come first --
+    recency is a weak signal but it is not a decorative one.
+    """
     older = bridge.index("a-term-policy.txt", CLIENT_LINES, ["sales_trainer"], days_ago=30)
     newer = bridge.index("b-term-policy.txt", CLIENT_LINES, ["sales_trainer"], days_ago=1)
 

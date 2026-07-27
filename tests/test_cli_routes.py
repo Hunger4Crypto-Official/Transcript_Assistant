@@ -29,7 +29,7 @@ from plaud_bridge.db import Database
 COVERED = {
     "doctor", "run", "watch", "digest", "status", "search", "verify", "forget",
     "export", "open", "audit", "release", "retention", "profiles",
-    "new-profile", "voices", "review", "speakers",
+    "new-profile", "voices", "review", "speakers", "followups",
 }
 
 
@@ -71,6 +71,10 @@ READ_ONLY = [
     ("profiles",),
     ("voices",),
     ("speakers", "list"),
+    ("followups",),
+    ("followups", "--status", "all"),
+    ("followups", "--format", "html"),
+    ("followups", "--profile", "insurance_agent"),
     ("verify",),
     ("review",),
     ("review", "--days", "7"),

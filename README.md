@@ -86,6 +86,9 @@ Other commands:
 | `run.py audit` | Read the compliance audit log |
 | `run.py audit --recording-id <id>` | Everything that happened to one recording |
 | `run.py audit --actor human --out audit.csv` | Export the human decisions |
+| `run.py followups` | **Commitments still open, oldest first** |
+| `run.py followups --draft open` | Draft the chase-ups into the outbox (never sends) |
+| `run.py followups --done <id>` | Mark one done so it stops resurfacing |
 | `run.py review` | What the review cadence says is due right now |
 | `run.py review --reaffirm father` | Record a standing-consent reaffirmation |
 | `run.py release <id>` | Release a quarantined recording after review |

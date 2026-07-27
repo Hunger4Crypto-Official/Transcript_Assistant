@@ -54,6 +54,13 @@ _WORD = re.compile(r"[a-z0-9']+")
 _PHRASE = re.compile(r'"([^"]{3,})"')
 _CONFIDENCE = ("high", "medium", "low")
 
+# The keys an extracted quote can arrive under, and the ones that describe it
+# rather than being it. Same set the digest renderer works from: a model asked
+# for {"timestamp", "speaker", "text"} will sometimes send "who" and "quote"
+# instead, and an item rendered as a blank line is an item silently lost.
+_QUOTE_KEYS = ("text", "quote", "statement", "content")
+_META_KEYS = ("timestamp", "time", "speaker", "who")
+
 
 _SUFFIXES = ("ies", "ing", "ed", "es", "s")
 
@@ -375,16 +382,16 @@ def _render_field(value: Any) -> list[tuple[str, str]]:
     if isinstance(value, dict):
         stamp = str(value.get("timestamp") or value.get("time") or "").strip()
         body = ""
-        for key in ("text", "quote", "statement", "content"):
+        for key in _QUOTE_KEYS:
             if value.get(key):
                 body = str(value[key]).strip()
                 break
         extras = "; ".join(
             f"{k}: {v}" for k, v in value.items()
-            if k not in ("text", "quote", "statement", "content", "timestamp", "time")
+            if k not in _QUOTE_KEYS + _META_KEYS
             and v not in (None, "", [], {}) and not isinstance(v, (dict, list))
         )
-        speaker = str(value.get("speaker") or "").strip()
+        speaker = str(value.get("speaker") or value.get("who") or "").strip()
         line = " ".join(p for p in (f"{speaker}:" if speaker else "", body, extras) if p)
         return [(stamp, line.strip())] if line.strip() else []
     return [("", str(value))]
@@ -421,16 +428,41 @@ def _transcript_excerpts(row: dict[str, Any], segments: list[dict[str, Any]],
     out: list[Excerpt] = []
     for start in sorted(starts):
         window = segments[start : start + (2 * context) + 1]
-        body = " ".join(str(s.get("text", "")).strip() for s in window).strip()
+        body, speakers = _window_text(window)
         if not body:
             continue
         out.append(Excerpt(
             recording_id=str(row["id"]), source_name=source, when=when,
             profile_id=str(row.get("governing_profile") or ""),
             stamp=format_stamp(float(window[0].get("start", 0.0) or 0.0)),
-            speaker=str(window[0].get("speaker", "")), text=body, kind="transcript",
+            # Only claim a speaker when the whole window belongs to one. An
+            # excerpt that spans a turn and is labelled with the first speaker
+            # attributes the reply to the wrong person, and the model would then
+            # cite it that way. The words carry their own labels instead.
+            speaker=speakers[0] if len(speakers) == 1 else "",
+            text=body, kind="transcript",
         ))
     return out, all_found, total_hits
+
+
+def _window_text(window: list[dict[str, Any]]) -> tuple[str, list[str]]:
+    """Render a stretch of segments, labelling each change of speaker inline."""
+    parts: list[str] = []
+    speakers: list[str] = []
+    current: str | None = None
+    for segment in window:
+        body = str(segment.get("text", "")).strip()
+        if not body:
+            continue
+        speaker = str(segment.get("speaker", "")).strip()
+        if speaker and speaker not in speakers:
+            speakers.append(speaker)
+        if speaker and speaker != current:
+            parts.append(f"{speaker}: {body}")
+            current = speaker
+        else:
+            parts.append(body)
+    return " ".join(parts).strip(), speakers
 
 
 def retrieve(question: str, cfg, db, archive, *, profile: str | None = None,
@@ -478,10 +510,10 @@ def retrieve(question: str, cfg, db, archive, *, profile: str | None = None,
     # the question actually contains quotes.
     boosted: dict[str, list[Excerpt]] = {}
     for phrase in result.phrases:
-        found = archive.search_content(
+        exact = archive.search_content(
             phrase, profile_id=profile, since_days=window, scan_limit=scan_limit, context=context,
         )
-        for match in found.matches:
+        for match in exact.matches:
             if match.personal and not include_personal:
                 continue
             boosted.setdefault(match.recording_id, []).append(Excerpt(
@@ -489,7 +521,7 @@ def retrieve(question: str, cfg, db, archive, *, profile: str | None = None,
                 when=match.when, profile_id=match.profile_id, stamp=match.stamp,
                 speaker=match.speaker, text=match.text, kind="transcript",
             ))
-        for entry in found.unopened:
+        for entry in exact.unopened:
             if entry not in result.unopened:
                 result.unopened.append(entry)
 
@@ -501,7 +533,9 @@ def retrieve(question: str, cfg, db, archive, *, profile: str | None = None,
         if record is None:
             # Same rule as search: a file that would not open is reported, never
             # counted as a file with nothing in it.
-            result.unopened.append(f"{row['id']}  {row['source_name']}")
+            entry = f"{row['id']}  {row['source_name']}"
+            if entry not in result.unopened:
+                result.unopened.append(entry)
             continue
         result.considered += 1
 
@@ -561,18 +595,27 @@ def retrieve(question: str, cfg, db, archive, *, profile: str | None = None,
 # =========================================================================
 # The context bundle
 # =========================================================================
-def _bundle(candidates: list[Candidate], *, local_only: bool, redact: bool,
-            patterns: dict[str, str], max_chars: int) -> tuple[str, list[Excerpt], int, int,
-                                                               dict[str, int]]:
+@dataclass
+class Bundle:
     """
-    Assemble the excerpts the model is allowed to see.
+    The excerpts the model is allowed to see, and everything it is not seeing.
 
-    Returns the text, the excerpts actually included, how many were left out,
-    how many were withheld as suppressed fields, and the redaction counts. The
-    left-out number is not decoration: it is stated in the prompt and again in
-    the answer, because silently truncating context and then answering with
-    confidence is how a summary comes to be wrong in a way nobody can see.
+    `left_out` and `withheld` are not bookkeeping. Both are stated in the prompt
+    and again in the answer, because silently truncating the context and then
+    answering with confidence is how a summary comes to be wrong in a way the
+    reader cannot detect.
     """
+
+    text: str = ""
+    used: list[Excerpt] = field(default_factory=list)
+    left_out: int = 0
+    withheld: int = 0
+    redactions: dict[str, int] = field(default_factory=dict)
+
+
+def _bundle(candidates: list[Candidate], *, local_only: bool, redact: bool,
+            patterns: dict[str, str], max_chars: int) -> Bundle:
+    """Assemble the context, in ranked order, up to the character budget."""
     pieces: list[str] = []
     used: list[Excerpt] = []
     counts: dict[str, int] = {}
@@ -615,7 +658,10 @@ def _bundle(candidates: list[Candidate], *, local_only: bool, redact: bool,
             used.append(excerpt)
             chars += len(piece)
 
-    return "\n".join(pieces).strip(), used, left_out, withheld, counts
+    return Bundle(
+        text="\n".join(pieces).strip(), used=used,
+        left_out=left_out, withheld=withheld, redactions=counts,
+    )
 
 
 # =========================================================================
@@ -872,40 +918,40 @@ def ask(question: str, cfg, db, archive, *, profile: str | None = None,
         _audit(db, answer, found)
         return answer
 
-    redact = _redaction_required(cfg, profile_ids)
-    bundle, used, left_out, withheld, redactions = _bundle(
+    bundle = _bundle(
         found.candidates,
         local_only=answer.local_only,
-        redact=redact,
+        redact=_redaction_required(cfg, profile_ids),
         patterns=cfg.get("compliance.redact_patterns") or {},
         max_chars=int(cfg.get("ask.max_context_chars", 24000)),
     )
-    answer.excerpts = used
-    answer.bundle_chars = len(bundle)
-    answer.left_out = left_out
-    answer.truncated = bool(left_out)
-    answer.redactions = redactions
+    answer.excerpts = bundle.used
+    answer.bundle_chars = len(bundle.text)
+    answer.left_out = bundle.left_out
+    answer.truncated = bool(bundle.left_out)
+    answer.redactions = bundle.redactions
 
-    if left_out:
+    if bundle.left_out:
         notes.append(
-            f"{left_out} excerpt(s) did not fit in the context budget "
+            f"{bundle.left_out} excerpt(s) did not fit in the context budget "
             "(ask.max_context_chars) and the answer was written without them."
         )
-    if withheld:
+    if bundle.withheld:
         notes.append(
-            f"{withheld} suppressed field(s) were withheld because this question "
-            "was allowed to use a cloud provider."
+            f"{bundle.withheld} suppressed field(s) were withheld because this "
+            "question was allowed to use a cloud provider."
         )
-    if redactions:
+    if bundle.redactions:
         notes.append(
             "Redacted before the model saw it: "
-            + ", ".join(f"{k}={v}" for k, v in sorted(redactions.items())) + "."
+            + ", ".join(f"{k}={v}" for k, v in sorted(bundle.redactions.items())) + "."
         )
     if locality_note:
         notes.append(locality_note)
 
     user = _user_prompt(
-        question, bundle, left_out, withheld, found.truncated_scan, len(found.unopened),
+        question, bundle.text, bundle.left_out, bundle.withheld,
+        found.truncated_scan, len(found.unopened),
     )
 
     try:
@@ -917,11 +963,13 @@ def ask(question: str, cfg, db, archive, *, profile: str | None = None,
     except LLMError as exc:
         answer.degraded = True
         answer.text = (
-            f"{len(used)} excerpt(s) from {len(answer.recordings_used)} recording(s) "
-            "match this question. They are listed below unsummarised: this is search "
-            "output, not an answer, because no model could be reached."
+            f"{len(bundle.used)} excerpt(s) from {len(answer.recordings_used)} "
+            "recording(s) match this question. They are listed below unsummarised: "
+            "this is search output, not an answer, because no model could be reached."
         )
-        notes.append(f"The provider chain said: {exc}")
+        # The chain's message lists one provider per line. The note is a
+        # paragraph, so flatten it rather than shredding the paragraph.
+        notes.append("The provider chain said: " + " ".join(str(exc).split()))
         notes.append(
             "Configure llm.local in pipeline.yaml (ollama or vLLM) if you want "
             "answers rather than excerpts. `run.py doctor` shows what is missing."
@@ -938,7 +986,7 @@ def ask(question: str, cfg, db, archive, *, profile: str | None = None,
     answer.confidence = confidence if confidence in _CONFIDENCE else "low"
 
     answer.citations, answer.dropped_citations, answer.repaired_citations = _validate_citations(
-        data.get("citations"), used,
+        data.get("citations"), bundle.used,
     )
     if answer.dropped_citations:
         notes.append(

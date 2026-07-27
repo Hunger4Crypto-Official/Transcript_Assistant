@@ -1001,8 +1001,21 @@ class MemoryStore:
         next prompt, would make that promise false in the most visible way
         possible.
         """
+        known = self._known_profiles()
+        ok, why = self.ready()
+        if not ok and any(self.path_for(pid).exists() for pid in known):
+            # Locked, so the ledgers on disk cannot even be read, let alone
+            # edited. Saying nothing here would let `forget` report a clean
+            # deletion over files that still hold the recording's contents.
+            self._problem(
+                f"{recording_id} could not be removed from the memory ledgers: {why} "
+                "The ledgers on disk still hold what this recording taught. Set the "
+                f"passphrase and run: run.py memory --forget {recording_id}"
+            )
+            return []
+
         changed: list[str] = []
-        for profile_id in self._known_profiles():
+        for profile_id in known:
             if self.ledger(profile_id).purge(recording_id):
                 changed.append(profile_id)
 
@@ -1104,9 +1117,11 @@ def carry_forward_brief(cfg, profile_id: str, store: MemoryStore | None = None, 
             f"WHAT YOU ALREADY KNOW ({profile.name}, carried forward from "
             f"{len(ledger.seen)} earlier recording(s))"
         ),
-        "Background from previous recordings, not part of the transcript below. Do not "
-        "quote it, do not repeat it into your output, and do not treat anything in it as "
-        "having been said today.",
+        # Kept short on purpose: it is spent out of the same budget as the
+        # content, and a preamble long enough to crowd out the notes it
+        # introduces would be its own kind of failure.
+        "Background from earlier recordings; it is not part of the transcript below. "
+        "Do not quote it or copy it into your output.",
     ]
 
     # Grouped for readability, but chosen in global rank order, so a long list of

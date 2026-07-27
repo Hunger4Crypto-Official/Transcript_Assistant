@@ -309,3 +309,39 @@ runtime:
   offline: false
   # Where local model weights live. Relative paths resolve against the project.
   models_dir: "./models"
+
+followups:
+  # Commitments become a worklist, and a worklist becomes a DRAFT that you send
+  # yourself. There is no mail configuration in this block because the code has
+  # no way to use one. That is the design, not an omission.
+
+  # Which extraction fields hold something somebody owes somebody. Matched
+  # against each field's key AND its label, so `promises_i_made`,
+  # `commitments_by_producer`, `action_items`, and "What They Asked For" are all
+  # found without being named. Add a token when a new profile calls it something
+  # these do not reach.
+  field_tokens: ["commitment", "promise", "action", "follow_up", "followup",
+                 "task", "todo", "asked_for", "asks_from", "next_step"]
+  # Name the fields outright for one profile when the tokens cannot reach them.
+  # An explicit list wins over field_tokens, for that profile only.
+  # fields:
+  #   father: ["promises_i_made", "next_action"]
+
+  # How many recordings the worklist opens. There is deliberately no default day
+  # window -- a promise does not stop counting because it is old -- so this is
+  # the bound instead.
+  max_recordings: 500
+  # A commitment longer than this is truncated. The id is derived from the text,
+  # so changing this re-ids anything it was truncating and those items will look
+  # new once.
+  max_text_chars: 400
+
+  # Let an LLM phrase a draft when one is reachable. Off is not a degraded mode:
+  # the template path is deterministic, needs no network, and is frequently the
+  # better output. Either way the strictest profile in the draft decides whether
+  # a cloud model may see it at all, and one locked profile locks the whole draft.
+  draft_with_llm: true
+  draft_max_tokens: 1200
+  # Ceiling on how many follow-ups go into one draft. A message listing forty
+  # things is not a follow-up, it is an invoice.
+  max_per_draft: 25

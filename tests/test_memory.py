@@ -247,7 +247,15 @@ def test_a_ledger_file_does_not_open_under_another_profiles_name(tmp_path, monke
 # Sensitive fields
 # =========================================================================
 def test_a_sensitive_or_suppressed_field_never_enters_the_ledger(tmp_path, monkeypatch):
-    cfg, store = _store(tmp_path, monkeypatch)
+    """
+    Config cannot talk memory into filing a sensitive field.
+
+    The mapping below asks for exactly that, the way a careless edit would, and
+    the profile's own `sensitive` and `suppress_fields` have to win anyway.
+    """
+    cfg, store = _store(tmp_path, monkeypatch, overrides={"memory": {"field_kinds": {
+        "health_disclosures": FACT, "financial_disclosures": FACT,
+    }}})
     store.update_from_record(_record("rec_client", "insurance_agent", AGENT_FIELDS))
 
     ledger = store.ledger("insurance_agent")
@@ -315,9 +323,12 @@ def test_the_brief_is_bounded_by_its_budget(tmp_path, monkeypatch):
         brief = carry_forward_brief(cfg, "father", store, budget=budget, now=NOW)
         assert len(brief) <= budget, f"budget {budget} overrun by {len(brief) - budget}"
 
-    assert carry_forward_brief(cfg, "father", store, budget=600, now=NOW), (
-        "a realistic budget produced nothing at all"
+    tight = carry_forward_brief(cfg, "father", store, budget=300, now=NOW)
+    assert 0 < len(tight) <= 300, (
+        "300 characters bought nothing at all, which means the fixed preamble is "
+        "eating the whole budget"
     )
+    assert "Open commitments" in tight, "the highest-ranked section was not what survived"
 
 
 def _fact_record(rid, text, when):
@@ -427,6 +438,26 @@ def test_forgetting_the_recording_that_closed_a_commitment_reopens_it(tmp_path, 
     entry = store.ledger("father").entry(COMMITMENT, "sign the permission slip when tonight")
     assert entry is not None and entry.open, (
         "a deleted recording is still deciding that a promise was kept"
+    )
+
+
+def test_forget_recording_with_a_locked_vault_says_so_instead_of_claiming_success(
+    tmp_path, monkeypatch
+):
+    cfg, store = _store(tmp_path, monkeypatch)
+    store.update_from_record(_record("rec_gone", "father", FATHER_FIELDS))
+    assert store.path_for("father").exists()
+
+    monkeypatch.delenv("PLAUD_BRIDGE_PASSPHRASE", raising=False)
+    locked = MemoryStore(cfg)
+    assert locked.forget_recording("rec_gone") == []
+    assert any("rec_gone" in p for p in locked.problems), (
+        "forget reported nothing to do over a ledger it could not open"
+    )
+
+    monkeypatch.setenv("PLAUD_BRIDGE_PASSPHRASE", "a-long-enough-test-passphrase")
+    assert "rec_gone" in json.dumps(MemoryStore(cfg).ledger("father").to_dict()), (
+        "this test only means something if the ledger really did survive"
     )
 
 
