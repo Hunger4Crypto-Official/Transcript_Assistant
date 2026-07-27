@@ -608,9 +608,24 @@ def cmd_open(args) -> int:
                   f"  run.py open {args.recording_id} --kind audio --out recording{path.suffixes[0] if path.suffixes else ''}")
             return 1
 
+        vault = Vault(cfg.path("vault"))
+
+        # A streamed artifact is by definition too big to hold in memory, so
+        # writing it out goes chunk by chunk too.
+        if args.out and path.suffix == ".enc" and Vault.is_streamed(path):
+            try:
+                dest = vault.read_stream(path, Path(args.out), args.recording_id)
+            except VaultError as exc:
+                print(f"could not decrypt: {exc}")
+                return 1
+            print(f"wrote {dest} ({dest.stat().st_size} bytes)")
+            print("That is a decrypted copy of the original recording. "
+                  "Delete it when you are done with it.")
+            return 0
+
         try:
             if path.suffix == ".enc":
-                blob = Vault(cfg.path("vault")).read(path, args.recording_id)
+                blob = vault.read(path, args.recording_id)
             else:
                 blob = path.read_bytes()
         except VaultError as exc:

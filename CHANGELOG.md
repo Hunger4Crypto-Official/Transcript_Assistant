@@ -1,5 +1,54 @@
 # Changelog
 
+## Unreleased — day-length recordings
+
+### Episodes: a day becomes a rundown per profile
+
+Wear the device from 8am to 6pm and the pipeline classified all of it as one
+thing from a 14,000 character sample — about twenty minutes of speech — and
+produced one summary of everything.
+
+- Long recordings are cut into episodes, each routed on its own, and each
+  profile's analysis is built only from the episodes that belong to it.
+- Segmentation is deterministic and local: a silence gap, a change in who is
+  talking, a drop in vocabulary overlap, and a maximum length. Every boundary
+  records which signal produced it.
+- A silence gap overrides the minimum-length rule. A two minute client call with
+  five minutes of driving either side is its own conversation however short it
+  is; merging it into the coaching session before it put two unrelated
+  conversations into one profile's rundown.
+- ADR-002 is unchanged: the strictest profile matched by any episode still
+  governs the whole file.
+
+### Offline is now an assertion
+
+- `runtime.offline` refuses to load while any cloud provider is enabled.
+- Models resolve against `runtime.models_dir`; missing offline, the error names
+  the directory it wanted and the command that fills it.
+- Diarization no longer needs a HuggingFace token once the weights are on disk.
+- `scripts/fetch_models.py` collects models and wheels for the one trip across.
+  `doctor --offline` audits it rather than assuming.
+
+### Large files
+
+A full working day is roughly 450MB as a 128kbps mp3, and encrypting the
+original needed the plaintext and the ciphertext resident at once — so the
+longest recording you own was the one that ran the machine out of memory.
+
+- Originals are encrypted a chunk at a time. Measured: a 419MB file round-trips
+  at 61MB peak RSS, against ~839MB for the one-shot path.
+- Each chunk is bound by AAD to the recording id, its index, and whether it is
+  the last one. That is what makes reordering, dropping a chunk, and truncation
+  fail loudly instead of handing back a shorter recording.
+- `verify` decrypts streamed artifacts to `os.devnull`, so checking a day of
+  audio opens does not load it or leave a plaintext copy behind.
+- `open --kind audio --out` streams out the same way.
+- `ingest.max_file_mb` raised 512 → 2048. It is a disk budget now, not a memory
+  one.
+- Artifacts written before this format still open unchanged.
+
+---
+
 ## Unreleased — full audit
 
 A deliberate audit of the code against its own claims. Everything below shipped,

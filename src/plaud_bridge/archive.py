@@ -14,6 +14,7 @@ destructive path.
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -303,7 +304,13 @@ class Archive:
                     report.checked.append(state)
                     continue
                 try:
-                    self.vault.read(path, row["recording_id"])
+                    if Vault.is_streamed(path):
+                        # Decrypt to nowhere. Reading a day of audio into memory
+                        # to prove it decrypts would defeat the point of having
+                        # streamed it in the first place.
+                        self.vault.read_stream(path, Path(os.devnull), row["recording_id"])
+                    else:
+                        self.vault.read(path, row["recording_id"])
                 except VaultError as exc:
                     state.status = "undecryptable"
                     state.detail = str(exc)

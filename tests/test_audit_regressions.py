@@ -125,8 +125,12 @@ def test_the_original_recording_is_encrypted_when_the_profile_encrypts(
 
     from plaud_bridge.storage import Vault
 
-    recovered = Vault(cfg.path("vault")).read(stored, payload["id"])
-    assert b"permission slip" in recovered, "the original did not survive encryption"
+    # Originals are streamed, so they come back out the same way -- a day of
+    # audio must never need to be resident in memory to be read.
+    assert Vault.is_streamed(stored)
+    out = tmp_path / "recovered.txt"
+    Vault(cfg.path("vault")).read_stream(stored, out, payload["id"])
+    assert b"permission slip" in out.read_bytes(), "the original did not survive encryption"
 
 
 # =========================================================================

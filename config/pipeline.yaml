@@ -35,14 +35,19 @@ ingest:
   # sensitive artifact of the lot. When the governing profile encrypts at rest,
   # the original goes into the vault rather than sitting in _processed/ in the
   # clear. Get it back with: run.py open <id> --kind audio --out file.mp3
-  # Encryption reads the whole file into memory, which is what max_file_mb caps.
+  # Encrypted a chunk at a time, so a full day of audio never has to be resident
+  # in memory.
   encrypt_archived_audio: true
   # Skip files modified in the last N seconds. A large recording still being
   # copied into the inbox would otherwise be ingested half-written, and the
   # content hash of the partial file is what gets deduped forever after.
   settle_seconds: 5
-  # Refuse files larger than this (guards against accidental 10-hour dumps).
-  max_file_mb: 512
+  # Refuse files larger than this. A full working day is the design point now:
+  # roughly 450MB as 128kbps mp3, more at higher bitrates, and the normalised
+  # WAV that ffmpeg writes to scratch is around 115MB per hour on top of that.
+  # Originals are encrypted a chunk at a time, so this is a disk budget rather
+  # than a memory one.
+  max_file_mb: 2048
 
 audio:
   # ffmpeg must be on PATH.

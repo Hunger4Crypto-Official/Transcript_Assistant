@@ -505,12 +505,16 @@ class Pipeline:
             # The original recording is the most sensitive artifact there is --
             # it is the actual voices. Leaving it in a predictable folder in the
             # clear while the transcript derived from it sits encrypted beside
-            # it made the vault theatre. This is read fully into memory to
-            # encrypt, which is why ingest.max_file_mb exists.
+            # it made the vault theatre.
+            #
+            # Streamed, a chunk at a time. A day of audio is several hundred
+            # megabytes and the one-shot path needs the plaintext and the
+            # ciphertext resident at once, which is how encrypting your longest
+            # recording became the thing that ran the machine out of memory.
             day = (rec.recorded_at or rec.ingested_at).strftime("%Y/%m/%d")
             try:
-                stored = self.vault.write(
-                    f"{day}/{rec.id}.source{path.suffix.lower()}", path.read_bytes(), rec.id
+                stored = self.vault.write_stream(
+                    f"{day}/{rec.id}.source{path.suffix.lower()}", path, rec.id
                 )
                 path.unlink()
             except (VaultError, OSError, MemoryError) as exc:
