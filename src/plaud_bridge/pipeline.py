@@ -31,10 +31,12 @@ from .config import Config
 from .correct import apply_corrections
 from .db import Database
 from .diarize import diarize
+from .episodes import segment_episodes, transcript_for
 from .logging_setup import get
 from .models import (
     ProfileAnalysis,
     Recording,
+    RouteMatch,
     RunStats,
     Segment,
     Stage,
@@ -283,13 +285,43 @@ class Pipeline:
         # fact-find full of health and financial disclosures went to a cloud
         # provider whenever it happened not to mention anyone's family.
         local_only = not self.cfg.cloud_llm_permitted_by_every_profile()
-        routing = route(rec.transcript, self.cfg, local_only=local_only)
-        rec.routes = routing.matches
-        rec.total_cost_usd += routing.cost_usd
+
+        # A day is not one conversation. Cut it into episodes and route each on
+        # its own, or a ten-hour recording gets classified from whatever
+        # happened to land in the router's character budget.
+        rec.episodes = segment_episodes(rec.transcript, self.cfg)
+        cap = int(self.cfg.get("episodes.max_per_recording", 40))
+        if len(rec.episodes) > cap:
+            log.warning(
+                "%d episodes exceeds episodes.max_per_recording (%d); routing the "
+                "first %d and folding the rest into the last one",
+                len(rec.episodes), cap, cap,
+            )
+            tail = rec.episodes[cap - 1:]
+            merged = tail[0]
+            for extra in tail[1:]:
+                merged.segments.extend(extra.segments)
+            rec.episodes = rec.episodes[: cap - 1] + [merged]
+
+        # Confidence for the recording as a whole is the best any episode
+        # managed. A single genuinely-Father episode in a work day means the day
+        # contains Father material, and ADR-002 then governs the whole file.
+        best: dict[str, RouteMatch] = {}
+        for episode in rec.episodes:
+            result = route(episode.transcript(rec.transcript), self.cfg, local_only=local_only)
+            episode.routes = result.matches
+            rec.total_cost_usd += result.cost_usd
+            for match in result.matches:
+                current = best.get(match.profile_id)
+                if current is None or match.confidence > current.confidence:
+                    best[match.profile_id] = match
+
+        rec.routes = sorted(best.values(), key=lambda m: -m.confidence)
         rec.stage = Stage.ROUTED
         self.db.audit(
             "route",
-            ", ".join(f"{r.profile_id}={r.confidence:.2f}" for r in rec.routes),
+            f"{len(rec.episodes)} episode(s); "
+            + ", ".join(f"{r.profile_id}={r.confidence:.2f}" for r in rec.routes),
             rec.id,
         )
 
@@ -320,18 +352,27 @@ class Pipeline:
         local_only = rec.compliance.force_local_processing or governing.hard_local_only \
             or not governing.allow_cloud_llm
 
-        body = rec.transcript.labelled_text()
-        redacted, counts = self.gate.redact_for_llm(body, governing)
-        for name, count in counts.items():
-            rec.compliance.redactions[name] = rec.compliance.redactions.get(name, 0) + count
-
         for match in rec.routes:
             if match.profile_id not in self.cfg.profiles:
                 continue
             profile = self.cfg.profile(match.profile_id)
 
+            # Each profile is analysed from ITS OWN episodes, not from the whole
+            # recording. This is what makes a full day produce a rundown per
+            # profile: the Insurance Agent analysis sees the client calls and
+            # nothing else, and it also keeps each call comfortably inside the
+            # extraction budget instead of truncating the day at two hours.
+            portion = transcript_for(match.profile_id, rec.episodes, rec.transcript)
+            if not portion.segments:
+                portion = rec.transcript
+
+            body = portion.labelled_text()
+            redacted, counts = self.gate.redact_for_llm(body, governing)
+            for name, count in counts.items():
+                rec.compliance.redactions[name] = rec.compliance.redactions.get(name, 0) + count
+
             analysis: ProfileAnalysis = extract(
-                rec.transcript, profile, self.cfg, redacted, local_only=local_only
+                portion, profile, self.cfg, redacted, local_only=local_only
             )
             rec.analyses.append(analysis)
             rec.total_cost_usd += analysis.cost_usd

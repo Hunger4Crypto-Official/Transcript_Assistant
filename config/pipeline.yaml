@@ -236,3 +236,27 @@ voice:
     # digest:
     #   needs_you:
     #     heading: "Before You Do Anything Else"
+
+episodes:
+  # A day is not one conversation. Long recordings are cut into episodes, each
+  # routed on its own, so every profile gets a rundown built only from the parts
+  # of the day that belong to it.
+  enabled: true
+  # Recordings shorter than this are treated as one conversation. Cutting a
+  # twenty minute client call into pieces multiplies the routing cost for
+  # nothing.
+  skip_below_seconds: 900
+  # Boundary signals, strongest first. A gap this long means people left.
+  silence_gap_seconds: 45
+  # How much the set of speakers has to change to count as a new conversation.
+  speaker_change_above: 0.6
+  # Vocabulary overlap between the window before and after a candidate point.
+  # Below this and the subject has changed.
+  topic_overlap_below: 0.08
+  comparison_window_segments: 12
+  # An episode shorter than this is a fragment and gets folded into its
+  # neighbour; one longer than this is split regardless of coherence.
+  min_seconds: 120
+  max_seconds: 1800
+  # Each episode costs one routing call. This caps a pathological day.
+  max_per_recording: 40

@@ -238,6 +238,9 @@ class Recording:
 
     transcript: Transcript | None = None
     routes: list[RouteMatch] = field(default_factory=list)
+    # Set by the pipeline. Typed loosely to keep models.py free of imports from
+    # the modules that depend on it.
+    episodes: list[Any] = field(default_factory=list)
     compliance: ComplianceVerdict = field(default_factory=ComplianceVerdict)
     analyses: list[ProfileAnalysis] = field(default_factory=list)
 
@@ -320,6 +323,7 @@ class Recording:
             "duration_seconds": self.duration_seconds,
             "transcript": transcript,
             "routes": [r.to_dict() for r in self.routes],
+            "episodes": [e.to_dict() for e in self.episodes],
             "compliance": self.compliance.to_dict(),
             "analyses": analyses,
             "total_cost_usd": self.total_cost_usd,
