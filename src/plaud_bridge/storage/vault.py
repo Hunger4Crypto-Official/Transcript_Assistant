@@ -193,69 +193,94 @@ class Vault:
             pass
         return dest
 
-    def read_stream(self, path: Path, dest: Path, recording_id: str = "") -> Path:
-        """Decrypt a streamed artifact to a file, a chunk at a time."""
+    def _stream_plaintext(self, path: Path, recording_id: str):
+        """
+        Yield the plaintext of a streamed artifact one chunk at a time.
+
+        Nothing here touches a destination. Decrypting and decrypting-to-a-file
+        are the same walk over the same chunks, and keeping the walk separate
+        from the writing is what lets `verify_stream` prove an artifact opens
+        without needing somewhere to put it.
+        """
         if not _AESGCM_AVAILABLE:
             raise VaultError("cryptography is not installed; cannot decrypt.")
-        path, dest = Path(path), Path(dest)
-        dest.parent.mkdir(parents=True, exist_ok=True)
 
         with open(path, "rb") as fin:
             if fin.read(len(MAGIC_STREAM)) != MAGIC_STREAM:
                 # Not streamed. Small enough for the one-shot path by definition.
-                dest.write_bytes(self.read(path, recording_id))
-                return dest
+                yield self.read(path, recording_id)
+                return
 
             salt = fin.read(SALT_LEN)
             fin.read(4)                       # chunk size, informational
             key = self._derive(salt)
             aes = AESGCM(key)
 
-            tmp = dest.with_name(dest.name + ".part")
+            index = 0
             saw_final = False
-            try:
-                with open(tmp, "wb") as fout:
-                    index = 0
-                    while True:
-                        nonce = fin.read(NONCE_LEN)
-                        if not nonce:
-                            break
-                        raw = fin.read(4)
-                        if len(nonce) != NONCE_LEN or len(raw) != 4:
-                            raise VaultError("vault file is truncated mid-chunk")
-                        body = fin.read(int.from_bytes(raw, "big"))
+            while True:
+                nonce = fin.read(NONCE_LEN)
+                if not nonce:
+                    break
+                raw = fin.read(4)
+                if len(nonce) != NONCE_LEN or len(raw) != 4:
+                    raise VaultError("vault file is truncated mid-chunk")
+                body = fin.read(int.from_bytes(raw, "big"))
 
-                        # Try "not final" first, then "final". The AAD is what
-                        # makes a dropped or reordered chunk fail rather than
-                        # silently producing a shorter file.
-                        for final in (False, True):
-                            try:
-                                fout.write(aes.decrypt(
-                                    nonce, body, self._stream_aad(recording_id, index, final)
-                                ))
-                                saw_final = final
-                                break
-                            except Exception:  # noqa: BLE001 - try the other marker
-                                continue
-                        else:
-                            raise VaultError(
-                                f"decryption failed at chunk {index}. Either the "
-                                "passphrase is wrong or the file has been modified."
-                            )
-                        if saw_final:
-                            break
-                        index += 1
-
-                if not saw_final:
+                # Try "not final" first, then "final". The AAD is what makes a
+                # dropped or reordered chunk fail rather than silently
+                # producing a shorter file.
+                for final in (False, True):
+                    try:
+                        block = aes.decrypt(
+                            nonce, body, self._stream_aad(recording_id, index, final)
+                        )
+                    except Exception:  # noqa: BLE001 - try the other marker
+                        continue
+                    saw_final = final
+                    yield block
+                    break
+                else:
                     raise VaultError(
-                        "vault file ended without its final chunk; it has been "
-                        "truncated. Refusing to hand back a partial recording."
+                        f"decryption failed at chunk {index}. Either the "
+                        "passphrase is wrong or the file has been modified."
                     )
-                os.replace(tmp, dest)
-            except BaseException:
-                tmp.unlink(missing_ok=True)
-                raise
+                if saw_final:
+                    break
+                index += 1
+
+            if not saw_final:
+                raise VaultError(
+                    "vault file ended without its final chunk; it has been "
+                    "truncated. Refusing to hand back a partial recording."
+                )
+
+    def read_stream(self, path: Path, dest: Path, recording_id: str = "") -> Path:
+        """Decrypt a streamed artifact to a file, a chunk at a time."""
+        path, dest = Path(path), Path(dest)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+
+        tmp = dest.with_name(dest.name + ".part")
+        try:
+            with open(tmp, "wb") as fout:
+                for block in self._stream_plaintext(path, recording_id):
+                    fout.write(block)
+            os.replace(tmp, dest)
+        except BaseException:
+            tmp.unlink(missing_ok=True)
+            raise
         return dest
+
+    def verify_stream(self, path: Path, recording_id: str = "") -> None:
+        """
+        Prove an artifact decrypts, writing nothing anywhere.
+
+        A day of audio is too big to hold in memory and a decrypted copy on
+        disk is exactly what the vault exists to prevent, so verification
+        walks the chunks and discards each one.
+        """
+        for _ in self._stream_plaintext(Path(path), recording_id):
+            pass
 
     @staticmethod
     def is_streamed(path: Path) -> bool:

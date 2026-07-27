@@ -12,8 +12,6 @@ last one, and the tests below are mostly about proving those three fail loudly
 rather than silently handing back a shorter recording.
 """
 
-import os
-
 import pytest
 
 from plaud_bridge.storage import Vault, VaultError
@@ -235,8 +233,7 @@ def test_verify_catches_a_corrupted_streamed_original(tmp_path, monkeypatch):
 
 
 def test_verify_does_not_write_the_decrypted_copy_anywhere(tmp_path, monkeypatch):
-    """It decrypts to os.devnull; a verify that leaves plaintext behind is worse
-    than no verify."""
+    """A verify that leaves plaintext behind is worse than no verify."""
     from _fixtures import CLIENT_CALL, build_sandbox, drop
     from plaud_bridge.archive import Archive
     from plaud_bridge.db import Database
@@ -250,15 +247,47 @@ def test_verify_does_not_write_the_decrypted_copy_anywhere(tmp_path, monkeypatch
     finally:
         pipe.close()
 
+    before = {p for p in cfg.root.rglob("*") if p.is_file()}
     db = Database(cfg.path("database"))
     try:
         Archive(cfg, db).verify()
     finally:
         db.close()
 
-    for path in cfg.root.rglob("*"):
-        if path.is_file() and path.suffix not in (".enc", ".db", ".log", ".yaml", ".txt",
-                                                  ".md", ".json", ".db-wal", ".db-shm"):
-            assert path.name != os.path.basename(os.devnull)
+    # Nothing new on disk at all, anywhere under the data root. The database
+    # journal is the one legitimate exception: opening the index writes it.
+    new = {p for p in cfg.root.rglob("*") if p.is_file()} - before
+    new = {p for p in new if p.suffix not in (".db-wal", ".db-shm")}
+    assert not new, f"verify wrote files it should not have: {sorted(new)}"
+
     leaked = [p for p in cfg.path("vault").rglob("*") if p.is_file() and p.suffix != ".enc"]
     assert not leaked, f"verify left decrypted files behind: {leaked}"
+
+
+def test_verify_stream_needs_no_writable_destination(vault, tmp_path):
+    """
+    The bug this pins: verification used to decrypt to os.devnull, which meant
+    it created os.devnull + ".part" alongside it. Root can do that. Nobody else
+    can, so verification failed everywhere it mattered.
+    """
+    source = _source(tmp_path, 300_000)
+    stored = vault.write_stream("x/rec_v.source.mp3", source, "rec_v", chunk_size=16384)
+
+    before = sorted(p.name for p in tmp_path.rglob("*"))
+
+    vault.verify_stream(stored, "rec_v")
+
+    assert sorted(p.name for p in tmp_path.rglob("*")) == before
+
+    blob = bytearray(stored.read_bytes())
+    blob[-10] ^= 0xFF
+    stored.write_bytes(bytes(blob))
+    with pytest.raises(VaultError):
+        vault.verify_stream(stored, "rec_v")
+
+
+def test_verify_stream_also_handles_a_one_shot_artifact(vault):
+    stored = vault.write("x/rec_o.transcript.md", "hello there", "rec_o")
+    vault.verify_stream(stored, "rec_o")
+    with pytest.raises(VaultError):
+        vault.verify_stream(stored, "rec_wrong")
