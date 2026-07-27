@@ -81,9 +81,12 @@ class Pipeline:
         archive = inbox / "_processed"
 
         found: list[Path] = []
-        # Surfaced so a run that processed nothing can explain itself rather
-        # than looking broken.
+        # All three are surfaced so a run that processed nothing can explain
+        # itself rather than looking broken. "inbox is empty" said over a
+        # directory with files in it is worse than no message at all.
         self.unsettled: list[Path] = []
+        self.unsupported: list[Path] = []
+        self.oversize: list[tuple[Path, float]] = []
         for path in sorted(inbox.rglob("*")):
             if not path.is_file() or path.name.startswith("."):
                 continue
@@ -93,6 +96,9 @@ class Pipeline:
             if archive in path.parents:
                 continue
             if path.suffix.lower() not in allowed:
+                log.info("skipping %s: %s is not an ingestible extension",
+                         path.name, path.suffix or "(no extension)")
+                self.unsupported.append(path)
                 continue
             # A file still being copied in is a partial file, and its content
             # hash is what dedupe remembers forever. Under `watch` this is not
@@ -106,6 +112,7 @@ class Pipeline:
             if size_mb > max_mb:
                 log.warning("skipping %s: %.0fMB exceeds ingest.max_file_mb (%.0f)",
                             path.name, size_mb, max_mb)
+                self.oversize.append((path, size_mb))
                 continue
             found.append(path)
         return found
@@ -145,7 +152,12 @@ class Pipeline:
             else:
                 self._load_text(rec, path)
 
-            if rec.transcript is None or not rec.transcript.segments:
+            # Segments existing is not the same as speech existing. A file of
+            # whitespace, or a byte order mark, or a stretch of zero-width
+            # characters parses into segments that hold nothing, and indexing
+            # that as a recording spends an LLM call to analyse silence and
+            # leaves a phantom entry in every digest thereafter.
+            if rec.transcript is None or not _has_speech(rec.transcript.segments):
                 raise PipelineError("no transcribable content found")
 
             rec.stage = Stage.CORRECTED
@@ -217,7 +229,12 @@ class Pipeline:
 
     def _load_text(self, rec: Recording, path: Path) -> None:
         """Accept a Plaud-exported transcript directly, skipping ASR entirely."""
-        raw = path.read_text(encoding="utf-8", errors="replace")
+        # utf-8-sig strips the byte order mark other tools leave at the front.
+        # Without it the first speaker's name carries an invisible character,
+        # which is enough to stop the speaker-label heuristics recognising it —
+        # and a file containing nothing but a BOM reads as one segment of
+        # content that is not there.
+        raw = path.read_text(encoding="utf-8-sig", errors="replace")
         segments = _parse_text_transcript(raw, path.suffix.lower())
         rec.transcript = Transcript(
             segments=segments,
@@ -566,7 +583,12 @@ class Pipeline:
             files = files[:limit]
 
         if not files:
-            log.info("inbox is empty: %s", self.cfg.path("inbox"))
+            skipped = len(self.unsettled) + len(self.unsupported) + len(self.oversize)
+            if skipped:
+                log.info("nothing to process in %s: %d file(s) present but skipped",
+                         self.cfg.path("inbox"), skipped)
+            else:
+                log.info("inbox is empty: %s", self.cfg.path("inbox"))
             return stats
 
         log.info("found %d file(s) to process", len(files))
@@ -613,6 +635,23 @@ _NOT_A_SPEAKER = frozenset({
 })
 
 WORDS_PER_SECOND = 2.6
+
+# Characters that occupy a string without being speech: byte order marks,
+# zero-width joiners and spaces, and the various invisible formatting marks
+# that survive a copy-paste out of a word processor.
+INVISIBLE = "﻿​‌‍⁠­￼�"
+
+
+def _has_speech(segments) -> bool:
+    """
+    Whether a parsed transcript holds anything anyone actually said.
+
+    Segments can exist and still be empty: a file of whitespace or invisible
+    characters parses into shapes that carry no text. Treating those as a
+    recording spends an LLM call on silence and puts a phantom entry in every
+    digest from then on.
+    """
+    return any((s.text or "").strip().strip(INVISIBLE).strip() for s in segments)
 
 
 def _speaker_split(line: str) -> tuple[str, str] | None:

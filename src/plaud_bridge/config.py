@@ -30,6 +30,33 @@ class ConfigError(Exception):
     """Raised for any configuration problem. Always actionable."""
 
 
+def _load_mapping(path: Path, label: str) -> dict[str, Any]:
+    """
+    Read a YAML file that must be a mapping.
+
+    These files are edited by hand, so both failure modes are ordinary: syntax
+    that does not parse, and syntax that parses into the wrong shape. A list
+    where a mapping was expected used to surface as `'list' object has no
+    attribute 'get'` several frames away from the file that caused it.
+    """
+    try:
+        raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except yaml.YAMLError as exc:
+        raise ConfigError(f"{label}: invalid YAML -> {exc}") from exc
+    except OSError as exc:
+        raise ConfigError(f"{label}: cannot be read -> {exc}") from exc
+
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        raise ConfigError(
+            f"{label}: expected a mapping of settings, found {type(raw).__name__}. "
+            f"The file should start with keys like 'paths:' rather than a list or "
+            f"a bare value."
+        )
+    return raw
+
+
 @dataclass
 class FieldSpec:
     key: str
@@ -110,10 +137,7 @@ class Profile:
 
     @classmethod
     def load(cls, path: Path) -> Profile:
-        try:
-            raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-        except yaml.YAMLError as exc:
-            raise ConfigError(f"{path.name}: invalid YAML -> {exc}") from exc
+        raw = _load_mapping(path, path.name)
 
         for key in REQUIRED_PROFILE_KEYS:
             if key not in raw:
@@ -231,7 +255,7 @@ class Glossary:
     def load(cls, path: Path) -> Glossary:
         if not path.exists():
             return cls()
-        raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        raw = _load_mapping(path, path.name)
         return cls(
             asr_bias_terms=[str(t) for t in raw.get("asr_bias_terms", [])],
             corrections={str(k): str(v) for k, v in (raw.get("corrections") or {}).items()},
@@ -314,10 +338,7 @@ class Config:
         if not pipeline_file.exists():
             raise ConfigError(f"missing {pipeline_file}")
 
-        try:
-            data = yaml.safe_load(pipeline_file.read_text(encoding="utf-8")) or {}
-        except yaml.YAMLError as exc:
-            raise ConfigError(f"pipeline.yaml: invalid YAML -> {exc}") from exc
+        data = _load_mapping(pipeline_file, "pipeline.yaml")
 
         profiles_dir = cfg_dir / "profiles"
         if not profiles_dir.is_dir():
@@ -437,7 +458,9 @@ class Config:
                     "runtime.offline is true but these cloud providers are enabled: "
                     + ", ".join(offenders)
                     + ". Disable them, or turn runtime.offline off. It cannot be "
-                      "both."
+                      "both. (A provider counts as cloud unless its block says "
+                      "is_cloud: false. That default is deliberate: a block that "
+                      "forgets to say gets treated as if it reaches the network.)"
                 )
 
         on_missing = self.get("compliance.on_missing_consent", "quarantine")

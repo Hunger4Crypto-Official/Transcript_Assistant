@@ -47,6 +47,27 @@ from .voice import Voice
 OK, WARN, BAD = "  ok  ", " warn ", " FAIL "
 
 
+def _confirm(prompt: str, expected: str) -> bool:
+    """
+    Ask for a typed confirmation before something irreversible.
+
+    Under cron, in a pipe, or with stdin closed there is nobody to ask, and
+    `input()` raises EOFError. Treating that as "not confirmed" is the only
+    safe reading: a delete that proceeds because nobody was there to say no
+    is the exact failure these prompts exist to prevent.
+    """
+    try:
+        answer = input(prompt).strip()
+    except (EOFError, KeyboardInterrupt):
+        print("\nno answer (stdin is not a terminal); nothing was changed. "
+              "Pass --yes to skip this prompt.")
+        return False
+    if answer != expected:
+        print("aborted")
+        return False
+    return True
+
+
 def _load(args) -> Config:
     cfg = Config.load(args.config)
     setup(
@@ -204,15 +225,40 @@ def cmd_run(args) -> int:
         if stats.failed:
             print(f"{stats.failed} recording(s) failed. Check the log at "
                   f"{cfg.path('logs') / 'bridge.log'}")
-        if pipe.unsettled and not stats.processed:
-            # Otherwise this looks like the tool ignored the file you just
-            # dropped in, which is exactly what it looks like.
+        # A file in the inbox that was not processed needs a reason, and the
+        # reason has to reach the person rather than only the log. Otherwise
+        # this looks like the tool ignored the file you just dropped in, which
+        # is exactly what it looks like.
+        if pipe.unsettled:
             print(f"\n{len(pipe.unsettled)} file(s) were written moments ago and were "
                   f"skipped in case they are still copying:")
             for path in pipe.unsettled[:5]:
                 print(f"  {path.name}")
             print(f"Run again in {cfg.get('ingest.settle_seconds', 5)}s, or set "
                   f"ingest.settle_seconds: 0 if your files always arrive complete.")
+
+        if pipe.unsupported:
+            audio = ", ".join(cfg.get("ingest.audio_extensions", []))
+            text = ", ".join(cfg.get("ingest.text_extensions", []))
+            print(f"\n{len(pipe.unsupported)} file(s) in the inbox are not a kind this "
+                  f"reads and were left alone:")
+            for path in pipe.unsupported[:5]:
+                print(f"  {path.name}")
+            if len(pipe.unsupported) > 5:
+                print(f"  ...and {len(pipe.unsupported) - 5} more")
+            print(f"Audio: {audio}\nText:  {text}")
+            print("Rename the file if it is really one of these, or add the extension "
+                  "to ingest.audio_extensions / ingest.text_extensions.")
+
+        if pipe.oversize:
+            limit_mb = float(cfg.get("ingest.max_file_mb", 512))
+            print(f"\n{len(pipe.oversize)} file(s) are larger than ingest.max_file_mb "
+                  f"({limit_mb:.0f}MB) and were skipped:")
+            for path, size_mb in pipe.oversize[:5]:
+                print(f"  {path.name}  {size_mb:.0f}MB")
+            print("Raise ingest.max_file_mb if you meant to process them. Originals are "
+                  "encrypted a chunk at a time, so this is a disk budget, not a memory one.")
+
         return 0 if stats.failed == 0 else 2
     finally:
         pipe.close()
@@ -391,11 +437,8 @@ def cmd_forget(args) -> int:
             print("  (no files on disk; the index entry will be removed)")
         print("\nThe audit log keeps a record that this was deleted. Nothing else survives.")
 
-        if not args.yes:
-            answer = input("\nType FORGET to confirm: ").strip()
-            if answer != "FORGET":
-                print("aborted")
-                return 1
+        if not args.yes and not _confirm("\nType FORGET to confirm: ", "FORGET"):
+            return 1
 
         removed, failures = Archive(cfg, db).forget(args.recording_id)
         print(f"\ndeleted {removed} file(s) and the index entry")
@@ -716,9 +759,7 @@ def cmd_release(args) -> int:
         if not args.yes:
             print(f"\nAbout to release {len(media)} file(s) back to the inbox.\n")
             print((qdir / "WHY.md").read_text(encoding="utf-8"))
-            answer = input("Type RELEASE to confirm you verified consent: ").strip()
-            if answer != "RELEASE":
-                print("aborted")
+            if not _confirm("Type RELEASE to confirm you verified consent: ", "RELEASE"):
                 return 1
 
         inbox = cfg.path("inbox")
@@ -744,14 +785,11 @@ def cmd_retention(args) -> int:
         plan = sweeper.plan(dry_run=dry)
         print("\n" + plan.render() + "\n")
         if not dry and not plan.empty:
-            if not args.yes:
-                answer = input(
-                    f"Delete {len(plan.items)} artifact(s)"
-                    + (f" and {plan.audit_rows} audit row(s)" if plan.audit_rows else "")
-                    + "? Type DELETE: ").strip()
-                if answer != "DELETE":
-                    print("aborted")
-                    return 1
+            if not args.yes and not _confirm(
+                f"Delete {len(plan.items)} artifact(s)"
+                + (f" and {plan.audit_rows} audit row(s)" if plan.audit_rows else "")
+                + "? Type DELETE: ", "DELETE"):
+                return 1
             removed = sweeper.execute(plan)
             print(f"deleted {removed} artifact(s)")
         return 0
@@ -840,9 +878,7 @@ def cmd_review(args) -> int:
             print(f"\n{profile.name}: {profile.consent_gate_key}")
             print("\n  This is not a formality. Confirm the people on these recordings")
             print("  still know the device records and are still fine with it.\n")
-            answer = input("Type YES to record the reaffirmation: ").strip()
-            if answer != "YES":
-                print("not recorded")
+            if not _confirm("Type YES to record the reaffirmation: ", "YES"):
                 return 1
             db.audit("consent_reaffirm", profile.id, actor="human")
             print(f"recorded. Next due in {profile.reaffirm_every_days} days.\n")
@@ -1119,6 +1155,12 @@ def main(argv: list[str] | None = None) -> int:
     except KeyboardInterrupt:
         print("\ninterrupted", file=sys.stderr)
         return 130
+    except EOFError:
+        # A prompt with nobody to answer it. `_confirm` handles the ones we
+        # know about; this is the backstop so a new prompt added later cannot
+        # turn a cron job into a traceback.
+        print("\nstdin closed while waiting for input; nothing was changed", file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":

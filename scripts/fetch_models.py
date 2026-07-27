@@ -107,7 +107,7 @@ def fetch_wheels(wheels_dir: Path, extras: list[str]) -> int:
     return 0
 
 
-def main(argv: list[str] | None = None) -> int:
+def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(
         description="Collect models and wheels for an offline install.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -123,6 +123,11 @@ def main(argv: list[str] | None = None) -> int:
                     help="optional dependency groups to include in the wheel set")
     ap.add_argument("--models-dir", default=str(ROOT / "models"))
     ap.add_argument("--wheels-dir", default=str(ROOT / "wheels"))
+    return ap
+
+
+def main(argv: list[str] | None = None) -> int:
+    ap = build_parser()
     args = ap.parse_args(argv)
 
     if not any([args.all, args.whisper, args.diarization, args.wheels]):
