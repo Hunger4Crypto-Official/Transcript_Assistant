@@ -340,6 +340,62 @@ so a crash halfway through still leaves evidence.
 
 ---
 
+## ADR-019: Unsafe defaults are the ones that ship
+
+**Decision.** `ComplianceVerdict.encrypt_at_rest` defaults to `True`. A
+recording is treated as needing encryption until a profile says otherwise.
+
+**Why.** The verdict is only filled in once the gate has run, and a recording
+can fail before that — a provider outage, a malformed profile, a bug. With the
+old `False` default, that path wrote the complete plaintext transcript of a
+family conversation into `bridge.db` and left it there permanently. Nothing
+raised. The run reported `failed=1` and looked like a normal bad day.
+
+**The general rule.** When a flag governs whether content may sit in the clear,
+the default is the safe one, and the unsafe value is set explicitly by the code
+that has actually established it is safe. Any default is a decision about what
+happens on the paths nobody thought about.
+
+**Related.** `is_encrypted` now reads that single field. It used to be derived
+from sensitivity while persistence used the profile's `encrypt_at_rest` flag —
+two sources of truth for one question, which a perfectly legal profile (high
+sensitivity, encryption off) made disagree.
+
+---
+
+## ADR-020: Destructive operations are bounded to our own directories
+
+**Decision.** `forget` and the retention sweep resolve every candidate path and
+refuse anything outside the configured `vault`, `outbox`, `inbox`, `quarantine`,
+and `work` directories. Refusals are logged, audited, and reported.
+
+**Why.** Deletion targets come from the index, and the index is a file. It can
+be restored from a backup taken when paths meant something else, hand-edited, or
+corrupted. Before this, `retention --execute` would unlink whatever it was told
+to. Verified: a row pointing at an unrelated PDF outside the data directory
+deleted the PDF.
+
+**Cost.** A legitimately relocated data directory now needs the index updated
+rather than silently following the old paths. That is the right way round.
+
+---
+
+## ADR-021: A search that did not look must not report a result
+
+**Decision.** `search_content` returns what it scanned, what it skipped, and
+what would not open. The command exits non-zero when the answer is incomplete,
+and scans everything by default.
+
+**Why.** The CLI's `--limit` reads as "how many results to show" and was being
+handed to the row query as "how many recordings to open". An archive of 60
+recordings had 10 searched and 50 silently excluded, and the command printed
+*nothing matching "elimination period" was said*. The phrase was in the archive.
+
+A tool that answers "that never happened" when it means "I did not look" is
+worse than one with no search at all, because you believe it.
+
+---
+
 ## Known limitations
 
 1. **Crosstalk breaks diarization.** When two people talk over each other,

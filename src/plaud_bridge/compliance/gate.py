@@ -55,6 +55,10 @@ class ComplianceGate:
         )
         verdict.governing_profile = governing.id
         verdict.governing_sensitivity = governing.sensitivity
+        # The single place this is decided. Persistence and the index both read
+        # it from here, so they cannot disagree about whether this recording's
+        # content is safe to keep in the clear.
+        verdict.encrypt_at_rest = governing.encrypt_at_rest
 
         if len(profile_ids) > 1 and self.strictest_governs:
             verdict.reasons.append(

@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import re
 import shutil
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -53,6 +54,7 @@ class PipelineError(RuntimeError):
 class Pipeline:
     def __init__(self, cfg: Config):
         self.cfg = cfg
+        self.unsettled: list[Path] = []
         cfg.ensure_dirs()
         self.db = Database(cfg.path("database"))
         self.vault = Vault(cfg.path("vault"))
@@ -71,10 +73,15 @@ class Pipeline:
         text_ext = {e.lower() for e in self.cfg.get("ingest.text_extensions", [])}
         allowed = audio_ext | text_ext
         max_mb = float(self.cfg.get("ingest.max_file_mb", 512))
+        settle = float(self.cfg.get("ingest.settle_seconds", 5))
+        now = time.time()
 
         archive = inbox / "_processed"
 
         found: list[Path] = []
+        # Surfaced so a run that processed nothing can explain itself rather
+        # than looking broken.
+        self.unsettled: list[Path] = []
         for path in sorted(inbox.rglob("*")):
             if not path.is_file() or path.name.startswith("."):
                 continue
@@ -84,6 +91,14 @@ class Pipeline:
             if archive in path.parents:
                 continue
             if path.suffix.lower() not in allowed:
+                continue
+            # A file still being copied in is a partial file, and its content
+            # hash is what dedupe remembers forever. Under `watch` this is not
+            # hypothetical: the poll lands mid-copy sooner or later.
+            if settle > 0 and (now - path.stat().st_mtime) < settle:
+                log.info("skipping %s: modified %.0fs ago, still settling",
+                         path.name, now - path.stat().st_mtime)
+                self.unsettled.append(path)
                 continue
             size_mb = path.stat().st_size / (1024 * 1024)
             if size_mb > max_mb:
@@ -332,7 +347,9 @@ class Pipeline:
     # ---- persistence ----------------------------------------------------
     def _persist(self, rec: Recording) -> None:
         governing = self.cfg.profile(rec.compliance.governing_profile or "unfiled")
-        encrypt = governing.encrypt_at_rest
+        # Read the gate's verdict rather than re-deriving it, so this and the
+        # index always agree. See models.Recording.is_encrypted.
+        encrypt = rec.is_encrypted
         day = (rec.recorded_at or rec.ingested_at).strftime("%Y/%m/%d")
         stem = f"{day}/{rec.id}"
 
@@ -436,26 +453,62 @@ class Pipeline:
         or `raw_audio_days` describes a sweep that never happens -- audio would
         be the one thing that never expires, which is exactly backwards.
         """
-        archive = self.cfg.path("inbox") / "_processed"
-        archive.mkdir(parents=True, exist_ok=True)
-        dest = archive / f"{rec.id}_{path.name}"
-        try:
-            shutil.move(str(path), str(dest))
-        except (OSError, shutil.Error) as exc:
-            log.warning("could not archive %s: %s", path.name, exc)
-            return
-
-        if rec.kind != "audio":
-            return
-
         governing = self.cfg.profile(
             rec.compliance.governing_profile or self.cfg.get("routing.fallback_profile", "unfiled")
         )
-        rec.artifact_paths["audio"] = str(dest)
+        encrypt = rec.is_encrypted and bool(
+            self.cfg.get("ingest.encrypt_archived_audio", True)
+        )
+
+        if encrypt:
+            # The original recording is the most sensitive artifact there is --
+            # it is the actual voices. Leaving it in a predictable folder in the
+            # clear while the transcript derived from it sits encrypted beside
+            # it made the vault theatre. This is read fully into memory to
+            # encrypt, which is why ingest.max_file_mb exists.
+            day = (rec.recorded_at or rec.ingested_at).strftime("%Y/%m/%d")
+            try:
+                stored = self.vault.write(
+                    f"{day}/{rec.id}.source{path.suffix.lower()}", path.read_bytes(), rec.id
+                )
+                path.unlink()
+            except (VaultError, OSError, MemoryError) as exc:
+                # Do not silently fall back to leaving it in the clear. Say so.
+                log.error(
+                    "could not encrypt the original of %s (%s). It has been left in "
+                    "the inbox unencrypted; move or delete it yourself.", path.name, exc,
+                )
+                self.db.audit(
+                    "archive_unencrypted",
+                    f"{path.name}: {exc}. Original left in the inbox in plaintext.",
+                    rec.id,
+                )
+                return
+            dest = stored
+        else:
+            archive = self.cfg.path("inbox") / "_processed"
+            archive.mkdir(parents=True, exist_ok=True)
+            # The archive is flat while the inbox is scanned recursively, so two
+            # files named recording.wav in different subfolders would collide and
+            # shutil.move would overwrite one without an error.
+            dest = archive / f"{rec.id}_{path.name}"
+            try:
+                shutil.move(str(path), str(dest))
+            except (OSError, shutil.Error) as exc:
+                log.warning("could not archive %s: %s", path.name, exc)
+                return
+
+        # Index it whatever it was. Skipping text imports here left an encrypted
+        # copy of the source in the vault that nothing pointed at and no sweep
+        # would ever expire -- an orphan holding the same words as the
+        # transcript. Both kinds are "the file you gave me" and both expire on
+        # the raw-audio clock, which is the shorter one.
+        kind = "audio" if rec.kind == "audio" else "source"
+        rec.artifact_paths[kind] = str(dest)
         self.db.upsert(rec)
         self.db.record_artifact(
-            rec.id, "audio", str(dest), False,
-            self.retention.expires_at("audio", governing, rec.recorded_at or rec.ingested_at),
+            rec.id, kind, str(dest), encrypt,
+            self.retention.expires_at(kind, governing, rec.recorded_at or rec.ingested_at),
         )
 
     # =====================================================================

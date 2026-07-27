@@ -31,6 +31,16 @@ ingest:
   dedupe: true
   # Move originals out of inbox after successful processing.
   archive_originals: true
+  # The original recording is the actual voices, which makes it the most
+  # sensitive artifact of the lot. When the governing profile encrypts at rest,
+  # the original goes into the vault rather than sitting in _processed/ in the
+  # clear. Get it back with: run.py open <id> --kind audio --out file.mp3
+  # Encryption reads the whole file into memory, which is what max_file_mb caps.
+  encrypt_archived_audio: true
+  # Skip files modified in the last N seconds. A large recording still being
+  # copied into the inbox would otherwise be ingested half-written, and the
+  # content hash of the partial file is what gets deduped forever after.
+  settle_seconds: 5
   # Refuse files larger than this (guards against accidental 10-hour dumps).
   max_file_mb: 512
 

@@ -41,11 +41,11 @@ def test_content_search_finds_words_inside_an_encrypted_transcript(tmp_path, mon
     cfg = _processed(tmp_path, monkeypatch)
     db = Database(cfg.path("database"))
     try:
-        matches, unopened = Archive(cfg, db).search_content("elimination period")
-        assert not unopened
-        assert matches, "the phrase is in the transcript and search did not find it"
-        assert "elimination period" in matches[0].text.lower()
-        assert matches[0].stamp
+        result = Archive(cfg, db).search_content("elimination period")
+        assert result.complete
+        assert result.matches, "the phrase is in the transcript and search did not find it"
+        assert "elimination period" in result.matches[0].text.lower()
+        assert result.matches[0].stamp
     finally:
         db.close()
 
@@ -54,9 +54,9 @@ def test_content_search_is_case_insensitive_and_reports_the_speaker(tmp_path, mo
     cfg = _processed(tmp_path, monkeypatch)
     db = Database(cfg.path("database"))
     try:
-        matches, _ = Archive(cfg, db).search_content("ELIMINATION PERIOD")
-        assert matches
-        assert matches[0].speaker == "Sasson"
+        result = Archive(cfg, db).search_content("ELIMINATION PERIOD")
+        assert result.matches
+        assert result.matches[0].speaker == "Sasson"
     finally:
         db.close()
 
@@ -71,9 +71,10 @@ def test_content_search_says_what_it_could_not_open(tmp_path, monkeypatch):
 
     db = Database(cfg.path("database"))
     try:
-        matches, unopened = Archive(cfg, db).search_content("elimination period")
-        assert not matches
-        assert unopened, "search silently returned zero hits for a file it could not read"
+        result = Archive(cfg, db).search_content("elimination period")
+        assert not result.matches
+        assert result.unopened, "search silently returned zero hits for a file it could not read"
+        assert not result.complete
     finally:
         db.close()
 
@@ -83,9 +84,9 @@ def test_content_search_marks_personal_recordings(tmp_path, monkeypatch):
                      files=(("dinner-with-kid.txt", FAMILY_DINNER),))
     db = Database(cfg.path("database"))
     try:
-        matches, _ = Archive(cfg, db).search_content("permission slip")
-        assert matches
-        assert matches[0].personal is True
+        result = Archive(cfg, db).search_content("permission slip")
+        assert result.matches
+        assert result.matches[0].personal is True
     finally:
         db.close()
 

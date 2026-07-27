@@ -1,5 +1,71 @@
 # Changelog
 
+## Unreleased — full audit
+
+A deliberate audit of the code against its own claims. Everything below shipped,
+and none of it raised an exception — which is what made it worth finding.
+
+### Content that should not have been in the clear
+
+- **A recording that failed between transcription and the compliance gate wrote
+  its full plaintext transcript into the unencrypted index, permanently.** The
+  gate decides whether content may sit in the clear, and it had not run yet, so
+  the flag still said "not encrypted". Reproduced with a family recording and a
+  simulated router outage. `encrypt_at_rest` now defaults to True and is only
+  relaxed by the gate once it knows the governing profile.
+- **Encryption had two sources of truth.** `is_encrypted` came from sensitivity
+  while persistence used the profile's `encrypt_at_rest`. A legal profile — high
+  sensitivity, encryption off — made them disagree: artifacts written in
+  plaintext while the index withheld them as encrypted, so the digest could
+  never render that recording again. One field now, read by both.
+- **The original recording was archived in the clear.** The most sensitive
+  artifact there is — the actual voices — sat in `inbox/_processed/` while the
+  transcript derived from it was encrypted beside it. Originals now go into the
+  vault when the governing profile encrypts at rest. Retrieve with
+  `run.py open <id> --kind audio --out file.mp3`.
+
+### A search that did not look
+
+- **`search --content` silently scanned only the 50 most recent recordings** and
+  reported "nothing matching X was said". The CLI's `--limit`, which reads as
+  "results to show", was being used as "recordings to open". It now scans
+  everything by default, reports what it scanned, and exits non-zero when the
+  answer is incomplete. `--scan-limit` bounds work explicitly and says so.
+
+### Deletes that reached outside the tool
+
+- **`forget` and `retention --execute` would unlink any path the index named.**
+  Verified: a row pointing at an unrelated PDF outside the data directory
+  deleted it. Both now refuse anything outside the configured directories, and
+  log, audit, and report the refusal.
+
+### Also fixed
+
+- Audit retention was never applied; `audit_log_days` was parsed and read by
+  nothing. Now swept, keeping the longest window any profile asks for, and
+  visible in the dry run before you execute it.
+- A file still being copied into the inbox could be ingested half-written, and
+  the partial file's content hash is what dedupe remembers forever.
+  `ingest.settle_seconds` skips it; a run that processed nothing says why.
+- Two processes racing on the same file (a `watch` loop and a manual `run`) hit
+  the UNIQUE constraint and reported the recording as failed. It is a duplicate.
+- An encrypted text import produced an orphan vault file nothing pointed at and
+  no sweep would expire. Originals are indexed whatever their kind.
+- `retention --execute` skipped audit-only plans because it tested `plan.items`.
+- Filename search treated `%` and `_` as LIKE wildcards, so `100% done.txt`
+  matched everything.
+- `export` rendered list fields as raw JSON; it now uses the digest's renderer.
+- `export --transcripts` necessarily includes the material `suppress_fields`
+  exists to withhold. It now says so, naming the fields, before writing.
+- `review` crashed on a timezone-naive audit timestamp.
+- Three copies of the same timestamp formatter, now one.
+
+### Testing
+
+128 → 143. `tests/test_audit_regressions.py` reproduces each defect above.
+
+---
+
 ## Unreleased — getting things back out
 
 The pipeline could put recordings in. Little could get them out again.

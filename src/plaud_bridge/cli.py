@@ -37,8 +37,9 @@ from .archive import Archive
 from .compliance import RetentionSweeper
 from .config import Config, ConfigError
 from .db import Database
-from .digest import DigestBuilder, DigestOptions, to_html
+from .digest import DigestBuilder, DigestOptions, fmt_value, to_html
 from .logging_setup import setup
+from .models import format_stamp
 from .pipeline import Pipeline
 from .storage import Vault, VaultError
 from .voice import Voice
@@ -170,6 +171,15 @@ def cmd_run(args) -> int:
         if stats.failed:
             print(f"{stats.failed} recording(s) failed. Check the log at "
                   f"{cfg.path('logs') / 'bridge.log'}")
+        if pipe.unsettled and not stats.processed:
+            # Otherwise this looks like the tool ignored the file you just
+            # dropped in, which is exactly what it looks like.
+            print(f"\n{len(pipe.unsettled)} file(s) were written moments ago and were "
+                  f"skipped in case they are still copying:")
+            for path in pipe.unsettled[:5]:
+                print(f"  {path.name}")
+            print(f"Run again in {cfg.get('ingest.settle_seconds', 5)}s, or set "
+                  f"ingest.settle_seconds: 0 if your files always arrive complete.")
         return 0 if stats.failed == 0 else 2
     finally:
         pipe.close()
@@ -260,14 +270,21 @@ def cmd_search(args) -> int:
 
 def _search_content(cfg, db, args) -> int:
     """Search what was said, decrypting the vault where it has to."""
-    archive = Archive(cfg, db)
-    matches, unopened = archive.search_content(
+    result = Archive(cfg, db).search_content(
         args.query, profile_id=args.profile, since_days=args.days,
-        limit=args.limit, context=args.context,
+        scan_limit=args.scan_limit, context=args.context,
     )
+    matches, unopened = result.matches, result.unopened
 
     if not matches and not unopened:
-        print(f'\nnothing matching "{args.query}" was said in the window searched\n')
+        print(f'\nnothing matching "{args.query}" was said in the '
+              f'{result.scanned} recording(s) searched')
+        if result.truncated:
+            print(f'  ...but only {result.scanned} of {result.total} were opened. '
+                  f'Raise --scan-limit or pass 0 to search everything.')
+            print()
+            return 2
+        print()
         return 0
 
     by_recording: dict[str, list] = {}
@@ -275,7 +292,7 @@ def _search_content(cfg, db, args) -> int:
         by_recording.setdefault(match.recording_id, []).append(match)
 
     print(f'\n{len(matches)} hit(s) across {len(by_recording)} recording(s) '
-          f'for "{args.query}"\n')
+          f'for "{args.query}", from {result.scanned} searched\n')
     for recording_id, hits in by_recording.items():
         head = hits[0]
         tag = "  [personal]" if head.personal else ""
@@ -288,15 +305,20 @@ def _search_content(cfg, db, args) -> int:
             print(f"      ... {len(hits) - args.per_recording} more in this recording")
         print()
 
+    # Never let a search quietly under-report. Concluding a phrase was never
+    # said, when really the file would not open or was never looked at, is the
+    # worst outcome this command has.
+    if result.truncated:
+        print(f"INCOMPLETE: only {result.scanned} of {result.total} recording(s) were "
+              f"searched (--scan-limit). Pass --scan-limit 0 to search everything.\n")
     if unopened:
-        # Never let a search quietly under-report. Concluding a phrase was never
-        # said, when really the file would not open, is the worst outcome here.
         print(f"{len(unopened)} recording(s) could not be opened and were NOT searched:")
         for entry in unopened[:20]:
             print(f"  {entry}")
+        if len(unopened) > 20:
+            print(f"  ... and {len(unopened) - 20} more")
         print("  Set PLAUD_BRIDGE_PASSPHRASE if these are encrypted.\n")
-        return 2
-    return 0
+    return 0 if result.complete else 2
 
 
 def cmd_verify(args) -> int:
@@ -381,6 +403,26 @@ def cmd_export(args) -> int:
         gate = ComplianceGate(cfg)
         rows = db.query(profile_id=args.profile, since_days=args.days, limit=args.limit)
 
+        if args.transcripts:
+            # `suppress_fields` keeps a client's health and financial
+            # disclosures out of rendered output. A raw transcript contains the
+            # sentences those fields were extracted FROM, so exporting
+            # transcripts necessarily includes them. Say so before writing, not
+            # in a footnote afterwards.
+            at_risk = sorted({
+                (p.field_by_key(f).label if p.field_by_key(f) else f)
+                for p in cfg.profiles.values() for f in p.suppress_fields
+            })
+            if at_risk:
+                print(
+                    "WARNING: --transcripts exports the raw conversation, which "
+                    "contains the material these fields exist to withhold:\n"
+                    f"  {', '.join(at_risk)}\n"
+                    "Redaction is pattern matching and will not catch a spoken "
+                    "diagnosis. Read the output before you send it.\n",
+                    file=sys.stderr,
+                )
+
         included, skipped, unopened = [], [], []
         for row in rows:
             governing = row["governing_profile"] or ""
@@ -414,7 +456,7 @@ def cmd_export(args) -> int:
             if args.transcripts:
                 segments = (record.get("transcript") or {}).get("segments") or []
                 body = "\n".join(
-                    f"[{_stamp(float(s.get('start', 0)))}] {s.get('speaker', '')}: {s.get('text', '')}"
+                    f"[{format_stamp(float(s.get('start', 0)))}] {s.get('speaker', '')}: {s.get('text', '')}"
                     for s in segments
                 )
                 redacted, counts = gate.redact_for_llm(body, profile) if profile else (body, {})
@@ -434,14 +476,17 @@ def cmd_export(args) -> int:
                     # place to make an exception.
                     if spec.key in section.suppress_fields:
                         continue
-                    values = analysis.get("fields", {}).get(spec.key)
-                    if not values:
+                    # Same renderer the digest uses, so an export reads like a
+                    # document rather than a JSON dump.
+                    lines = fmt_value(analysis.get("fields", {}).get(spec.key))
+                    if not lines:
                         continue
-                    rendered = json.dumps(values, ensure_ascii=False) if isinstance(values, (dict, list)) else str(values)
-                    redacted, counts = gate.redact_for_llm(rendered, section)
+                    redacted, counts = gate.redact_for_llm("\n".join(lines), section)
                     for key, value in counts.items():
                         redaction_total[key] = redaction_total.get(key, 0) + value
-                    out += [f"**{spec.label}**", "", redacted, ""]
+                    out += [f"**{spec.label}**", ""]
+                    out += [f"- {line}" for line in redacted.splitlines()]
+                    out += [""]
 
         # The caveat prints whether or not anything matched. Zero matches means
         # no pattern fired, which is not the same as nothing sensitive being
@@ -506,12 +551,6 @@ def cmd_watch(args) -> int:
             return 0
 
 
-def _stamp(seconds: float) -> str:
-    minutes, secs = divmod(int(seconds), 60)
-    hours, minutes = divmod(minutes, 60)
-    return f"{hours:02d}:{minutes:02d}:{secs:02d}" if hours else f"{minutes:02d}:{secs:02d}"
-
-
 def cmd_open(args) -> int:
     cfg = _load(args)
     db = Database(cfg.path("database"))
@@ -529,14 +568,33 @@ def cmd_open(args) -> int:
         if not path.exists():
             print(f"artifact missing from disk (retention sweep?): {path}")
             return 1
-        if path.suffix == ".enc":
-            try:
-                print(Vault(cfg.path("vault")).read_text(path, args.recording_id))
-            except VaultError as exc:
-                print(f"could not decrypt: {exc}")
-                return 1
-        else:
-            print(path.read_text(encoding="utf-8"))
+
+        # Audio is bytes, and printing it to a terminal helps nobody.
+        if key in ("audio", "source") and not args.out:
+            print(f"'{path.name}' is audio. Pass --out to write it somewhere:\n"
+                  f"  run.py open {args.recording_id} --kind audio --out recording{path.suffixes[0] if path.suffixes else ''}")
+            return 1
+
+        try:
+            if path.suffix == ".enc":
+                blob = Vault(cfg.path("vault")).read(path, args.recording_id)
+            else:
+                blob = path.read_bytes()
+        except VaultError as exc:
+            print(f"could not decrypt: {exc}")
+            return 1
+
+        if args.out:
+            dest = Path(args.out)
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_bytes(blob)
+            print(f"wrote {dest} ({len(blob)} bytes)")
+            if key in ("audio", "source"):
+                print("That is a decrypted copy of the original recording. "
+                      "Delete it when you are done with it.")
+            return 0
+
+        print(blob.decode("utf-8", "replace"))
         return 0
     finally:
         db.close()
@@ -637,9 +695,12 @@ def cmd_retention(args) -> int:
         dry = not args.execute
         plan = sweeper.plan(dry_run=dry)
         print("\n" + plan.render() + "\n")
-        if not dry and plan.items:
+        if not dry and not plan.empty:
             if not args.yes:
-                answer = input(f"Delete {len(plan.items)} artifact(s)? Type DELETE: ").strip()
+                answer = input(
+                    f"Delete {len(plan.items)} artifact(s)"
+                    + (f" and {plan.audit_rows} audit row(s)" if plan.audit_rows else "")
+                    + "? Type DELETE: ").strip()
                 if answer != "DELETE":
                     print("aborted")
                     return 1
@@ -763,7 +824,13 @@ def cmd_review(args) -> int:
                 print(f"  [DUE] {profile.name:18s} never reaffirmed")
                 due.append(f"run.py review --reaffirm {pid}")
                 continue
-            age = (now - datetime.fromisoformat(last)).days
+            stamped = datetime.fromisoformat(last)
+            if stamped.tzinfo is None:
+                # Everything we write is timezone-aware, but a hand-edited row
+                # or an older database need not be. Assume UTC rather than
+                # raising and taking the whole review down with it.
+                stamped = stamped.replace(tzinfo=timezone.utc)
+            age = (now - stamped).days
             if age >= profile.reaffirm_every_days:
                 print(f"  [DUE] {profile.name:18s} last {age}d ago "
                       f"(every {profile.reaffirm_every_days}d)")
@@ -906,6 +973,9 @@ def build_parser() -> argparse.ArgumentParser:
                    help="segments of surrounding speech to include (with --content)")
     p.add_argument("--per-recording", type=int, default=5,
                    help="hits to show per recording before summarising the rest")
+    p.add_argument("--scan-limit", type=int, default=0,
+                   help="with --content: max recordings to open (0 = all). This "
+                        "bounds work, not results; a bounded search says so.")
     p.add_argument("--profile", default=None)
     p.add_argument("--days", type=int, default=None)
     p.add_argument("--limit", type=int, default=50)
@@ -940,7 +1010,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("open", help="print an artifact, decrypting if needed")
     p.add_argument("recording_id")
-    p.add_argument("--kind", default="transcript", choices=["transcript", "analysis"])
+    p.add_argument("--kind", default="transcript",
+                   choices=["transcript", "analysis", "audio", "source"])
+    p.add_argument("--out", default=None,
+                   help="write to a file instead of stdout (required for audio)")
     p.set_defaults(func=cmd_open)
 
     p = sub.add_parser("audit", help="read the compliance audit log")

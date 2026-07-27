@@ -81,6 +81,7 @@ Other commands:
 | `run.py export --days 30` | Build a redacted document for someone else |
 | `run.py forget <id>` | Permanently delete one recording |
 | `run.py open <id>` | Decrypt and print a transcript |
+| `run.py open <id> --kind audio --out f.mp3` | Recover the original recording |
 | `run.py open <id> --kind analysis` | Decrypt and print the structured analysis |
 | `run.py audit` | Read the compliance audit log |
 | `run.py audit --recording-id <id>` | Everything that happened to one recording |
@@ -224,10 +225,14 @@ python run.py search "biopsy" --content --profile husband --context 2
 ```
 
 `--content` searches what was said, decrypting the vault where it has to, and
-prints the timestamp and speaker of every hit. **If a recording cannot be
-decrypted it says so and exits non-zero** rather than returning fewer results —
-concluding a phrase was never said, when really the file would not open, is the
-worst thing a search over your own archive can do to you.
+prints the timestamp and speaker of every hit. It scans **everything** in the
+window by default; `--scan-limit N` bounds the work and then says the answer is
+incomplete.
+
+**A search that could not look says so and exits non-zero** — whether a file
+would not decrypt or a bound stopped it early. Concluding a phrase was never
+said, when really nothing opened it, is the worst thing a search over your own
+archive can do to you.
 
 ### Verify
 
@@ -359,7 +364,7 @@ which means the halt threshold cannot see it.
 python -m pytest tests/ -q
 ```
 
-128 tests, no network and no API keys required.
+143 tests, no network and no API keys required.
 
 The ones that matter most are in **`test_privacy_guarantees.py`**. Every test
 there corresponds to a sentence this README states as a promise: a family

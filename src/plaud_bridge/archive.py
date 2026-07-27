@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any
 
 from .logging_setup import get
+from .models import format_stamp
 from .storage import Vault, VaultError
 
 log = get("archive")
@@ -34,6 +35,26 @@ class Match:
     stamp: str
     speaker: str
     text: str
+
+
+@dataclass
+class SearchResult:
+    """
+    What a search found, and what it did not look at.
+
+    `truncated` and `unopened` exist so a caller can never present a partial
+    search as a complete one.
+    """
+
+    matches: list[Match] = field(default_factory=list)
+    unopened: list[str] = field(default_factory=list)
+    scanned: int = 0
+    total: int = 0
+    truncated: bool = False
+
+    @property
+    def complete(self) -> bool:
+        return not self.truncated and not self.unopened
 
 
 @dataclass
@@ -110,11 +131,39 @@ class VerifyReport:
         return not self.problems and not self.unreachable
 
 
+def owned_roots(cfg) -> list[Path]:
+    """The directories this tool is allowed to delete inside."""
+    roots: list[Path] = []
+    for name in ("vault", "outbox", "inbox", "quarantine", "work"):
+        try:
+            roots.append(cfg.path(name).resolve())
+        except Exception:  # noqa: BLE001 - a missing path is simply not a root
+            continue
+    return roots
+
+
+def is_owned(path: Path, roots: list[Path]) -> bool:
+    """
+    True when `path` lives inside one of our own directories.
+
+    Deletion targets come from the index, and the index is a file: restored from
+    a backup, hand-edited, or written by a version whose paths pointed somewhere
+    else. Unlinking whatever it names is how a tool deletes something that was
+    never its business. Everything destructive checks this first.
+    """
+    try:
+        resolved = path.resolve()
+    except OSError:
+        return False
+    return any(resolved == root or root in resolved.parents for root in roots)
+
+
 class Archive:
     def __init__(self, cfg, db, vault: Vault | None = None):
         self.cfg = cfg
         self.db = db
         self.vault = vault or Vault(cfg.path("vault"))
+        self.roots = owned_roots(cfg)
 
     # =====================================================================
     # Reading
@@ -161,27 +210,43 @@ class Archive:
     # Search
     # =====================================================================
     def search_content(self, query: str, profile_id: str | None = None,
-                       since_days: int | None = None, limit: int = 200,
-                       context: int = 0) -> tuple[list[Match], list[str]]:
+                       since_days: int | None = None, scan_limit: int = 0,
+                       context: int = 0) -> SearchResult:
         """
         Find a phrase in what was actually said.
 
-        Returns (matches, unopened). `unopened` lists recordings whose content
-        is encrypted and could not be decrypted, because silently returning
-        fewer results than exist is the wrong answer for a search over your own
-        archive -- you would conclude the phrase was never said.
+        `scan_limit` bounds how many RECORDINGS are opened, not how many hits
+        come back, and 0 means all of them. That distinction is the whole point:
+        this used to take the CLI's `--limit` -- which a user reads as "how many
+        results to show" -- and hand it to the row query, so an archive of 600
+        recordings had its oldest 550 silently excluded. A search that answers
+        "that was never said" because it did not look is worse than no search.
+
+        The result carries what was scanned, what was skipped, and what would
+        not open, so the caller can say so out loud.
         """
         needle = query.lower().strip()
-        matches: list[Match] = []
-        unopened: list[str] = []
+        result = SearchResult()
         if not needle:
-            return matches, unopened
+            return result
 
         personal = {
             p.id for p in self.cfg.profiles.values() if p.exclude_from_combined_export
         }
 
-        for row in self.db.query(profile_id=profile_id, since_days=since_days, limit=limit):
+        total = self.db.count_recordings(profile_id=profile_id, since_days=since_days)
+        rows = self.db.query(
+            profile_id=profile_id, since_days=since_days,
+            limit=scan_limit if scan_limit > 0 else total or 1,
+        )
+        result.scanned = len(rows)
+        result.total = total
+        result.truncated = total > len(rows)
+
+        matches = result.matches
+        unopened = result.unopened
+
+        for row in rows:
             segments = self.segments(row)
             if segments is None:
                 unopened.append(f"{row['id']}  {row['source_name']}")
@@ -201,11 +266,11 @@ class Archive:
                     when=when,
                     profile_id=row["governing_profile"] or "",
                     personal=(row["governing_profile"] or "") in personal,
-                    stamp=_stamp(float(segment.get("start", 0.0))),
+                    stamp=format_stamp(float(segment.get("start", 0.0))),
                     speaker=str(segment.get("speaker", "")),
                     text=text.strip(),
                 ))
-        return matches, unopened
+        return result
 
     # =====================================================================
     # Verify
@@ -268,13 +333,15 @@ class Archive:
     # =====================================================================
     def plan_forget(self, recording_id: str) -> list[Path]:
         """Every file that `forget` would remove. Read-only."""
+        return self._plan_forget(recording_id)[0]
+
+    def _plan_forget(self, recording_id: str) -> tuple[list[Path], list[Path]]:
+        """(targets, refused) — refused are paths outside our own directories."""
         targets: list[Path] = []
 
-        rows = self.db.query(limit=100000)
-        row = next((r for r in rows if r["id"] == recording_id), None)
-        if row is not None:
-            for value in self._payload(row).get("artifact_paths", {}).values():
-                targets.append(Path(str(value)))
+        payload = self.db.load(recording_id) or {}
+        for value in payload.get("artifact_paths", {}).values():
+            targets.append(Path(str(value)))
 
         for artifact in self.db.all_artifacts():
             if artifact["recording_id"] == recording_id:
@@ -291,14 +358,26 @@ class Archive:
 
         seen: set[Path] = set()
         unique: list[Path] = []
+        refused: list[Path] = []
         for path in targets:
-            resolved = path.resolve()
+            try:
+                resolved = path.resolve()
+            except OSError:
+                continue
             if resolved in seen:
                 continue
             seen.add(resolved)
-            if path.exists():
-                unique.append(path)
-        return unique
+            if not path.exists():
+                continue
+            if not is_owned(path, self.roots):
+                log.error(
+                    "refusing to delete %s: it is outside every configured data "
+                    "directory. The index should not be pointing there.", path,
+                )
+                refused.append(path)
+                continue
+            unique.append(path)
+        return unique, refused
 
     def forget(self, recording_id: str) -> tuple[int, list[str]]:
         """
@@ -307,15 +386,18 @@ class Archive:
         The audit entry is written BEFORE anything is removed, so a crash
         halfway through still leaves evidence that a deletion was attempted.
         """
-        targets = self.plan_forget(recording_id)
+        targets, refused = self._plan_forget(recording_id)
         self.db.audit(
             "forget",
-            f"deleting {len(targets)} file(s) and the index entry",
+            f"deleting {len(targets)} file(s) and the index entry"
+            + (f"; refused {len(refused)} outside the data directory" if refused else ""),
             recording_id, actor="human",
         )
 
         removed = 0
-        failures: list[str] = []
+        failures: list[str] = [
+            f"{path}: outside every configured data directory, left alone" for path in refused
+        ]
         for path in targets:
             try:
                 path.unlink()
@@ -336,9 +418,3 @@ class Archive:
         self.db.delete_recording(recording_id)
         self.db.audit("forget_complete", f"removed {removed} file(s)", recording_id, actor="human")
         return removed, failures
-
-
-def _stamp(seconds: float) -> str:
-    minutes, secs = divmod(int(seconds), 60)
-    hours, minutes = divmod(minutes, 60)
-    return f"{hours:02d}:{minutes:02d}:{secs:02d}" if hours else f"{minutes:02d}:{secs:02d}"

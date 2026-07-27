@@ -131,6 +131,10 @@ def build_sandbox(tmp_path, monkeypatch, stub: StubLLM | None = None,
         data["paths"][key] = str(tmp_path / "data" / key)
     data["paths"]["database"] = str(tmp_path / "data" / "bridge.db")
     data["diarization"]["enabled"] = False
+    # Tests write a file and process it in the same millisecond. The settle
+    # window exists for real inboxes where a large file may still be copying;
+    # here it would just skip everything.
+    data["ingest"]["settle_seconds"] = 0
     for block, values in (overrides or {}).items():
         data.setdefault(block, {}).update(values)
     (cfg_dir / "pipeline.yaml").write_text(yaml.safe_dump(data))
