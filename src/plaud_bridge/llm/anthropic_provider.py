@@ -1,8 +1,29 @@
-"""Anthropic Messages API backend."""
+"""
+Anthropic Messages API backend.
+
+Two things here are model-generation specific and worth knowing before editing.
+
+Sampling parameters are not sent. `temperature` used to be pinned to 0.0 for
+determinism, which the current models reject outright -- they removed the
+sampling parameters, so sending one is a 400 rather than a no-op. A zero
+temperature never guaranteed identical output anyway; the output contract in the
+extraction prompt does that work.
+
+The system prompt is sent as a cached block. A profile's system prompt, persona,
+and schema are byte-identical across every recording and every episode of every
+recording, so without this the same few thousand tokens are paid for at full
+price forever. Cache reads bill at a fraction of fresh input.
+
+Caching is a prefix match, which is the constraint to respect when changing this
+file: the stable half of the prompt has to come first, and a single changed byte
+ahead of the marker invalidates everything after it. That is why the transcript
+travels in the user turn and never inside the system block.
+"""
 
 from __future__ import annotations
 
 import os
+from typing import Any
 
 from ..http_util import HttpError, post_json
 from ..logging_setup import get
@@ -18,11 +39,15 @@ class AnthropicLLM(LLMProvider):
     def __init__(self, cfg):
         super().__init__(cfg)
         self.base_url = cfg.get("llm.anthropic.base_url", "https://api.anthropic.com/v1")
-        self.model = cfg.get("llm.anthropic.model", "claude-sonnet-4-6")
+        self.model = cfg.get("llm.anthropic.model", "claude-opus-5")
         self.key_env = cfg.get("llm.anthropic.api_key_env", "ANTHROPIC_API_KEY")
         self.version = cfg.get("llm.anthropic.version_header", "2023-06-01")
-        self.max_tokens = int(cfg.get("llm.anthropic.max_tokens", 8000))
-        self.temperature = float(cfg.get("llm.anthropic.temperature", 0.0))
+        # Thinking is on by default on the current models and shares this ceiling
+        # with the response text, so a budget sized around the answer alone
+        # truncates mid-JSON.
+        self.max_tokens = int(cfg.get("llm.anthropic.max_tokens", 16000))
+        self.effort = str(cfg.get("llm.anthropic.effort", "medium") or "").strip()
+        self.cache_system = bool(cfg.get("llm.anthropic.cache_system_prompt", True))
         self.timeout = int(cfg.get("llm.anthropic.timeout_seconds", 180))
         self.retries = int(cfg.get("llm.anthropic.max_retries", 4))
 
@@ -38,13 +63,26 @@ class AnthropicLLM(LLMProvider):
         if not ok:
             raise LLMError(f"anthropic unavailable: {why}")
 
-        payload = {
+        system_block: Any = system
+        if self.cache_system and system.strip():
+            system_block = [{
+                "type": "text",
+                "text": system,
+                "cache_control": {"type": "ephemeral"},
+            }]
+
+        payload: dict[str, Any] = {
             "model": self.model,
             "max_tokens": max_tokens or self.max_tokens,
-            "temperature": self.temperature,
-            "system": system,
+            "system": system_block,
             "messages": [{"role": "user", "content": user}],
         }
+        if self.effort:
+            # Depth, and the main cost lever now that there is no token budget to
+            # set. Extraction is a read-and-fill task rather than a reasoning
+            # one, so it does not want the ceiling.
+            payload["output_config"] = {"effort": self.effort}
+
         try:
             data = post_json(
                 f"{self.base_url}/messages",
@@ -74,6 +112,9 @@ class AnthropicLLM(LLMProvider):
             + int(usage.get("cache_read_input_tokens", 0))
         )
         output_tokens = int(usage.get("output_tokens", 0))
+        cached = int(usage.get("cache_read_input_tokens", 0))
+        if cached:
+            log.debug("%d input token(s) served from cache", cached)
         return LLMResponse(
             text=text,
             provider=self.name,

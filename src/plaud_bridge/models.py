@@ -226,6 +226,9 @@ class ProfileAnalysis:
     llm_model: str = ""
     cost_usd: float = 0.0
     requires_human_attention: bool = False
+    # Quotes the model attributed to somebody that were not actually in the
+    # transcript it was given, and were therefore dropped. See extractor.py.
+    unverified_quotes: int = 0
     error: str = ""
 
     def to_dict(self) -> dict[str, Any]:

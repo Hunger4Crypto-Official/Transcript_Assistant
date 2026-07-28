@@ -28,12 +28,22 @@ CALL_COST = 0.01
 # Pricing
 # =========================================================================
 def test_price_uses_the_configured_token_rates(sandbox):
+    """
+    Read the rates from config rather than restating them.
+
+    Pinning the shipped numbers here made this test a second place prices had
+    to be updated, and it failed the day the model changed -- reporting a
+    pricing bug where there was only a stale test. What is worth pinning is
+    that `price` reads config at all.
+    """
     cfg, _ = sandbox
     provider = AnthropicLLM(cfg)
+    rate_in = float(cfg.get("llm.anthropic.usd_per_million_input_tokens"))
+    rate_out = float(cfg.get("llm.anthropic.usd_per_million_output_tokens"))
+    assert rate_in > 0 and rate_out > 0, "the shipped config has no anthropic rates"
 
-    # config ships 3.00 in / 15.00 out per million
-    assert provider.price(1_000_000, 1_000_000) == pytest.approx(18.00)
-    assert provider.price(500_000, 0) == pytest.approx(1.50)
+    assert provider.price(1_000_000, 1_000_000) == pytest.approx(rate_in + rate_out)
+    assert provider.price(500_000, 0) == pytest.approx(rate_in / 2)
     assert provider.price(0, 0) == 0.0
 
 
@@ -66,9 +76,11 @@ def test_anthropic_bills_cache_tokens_rather_than_dropping_them(sandbox, monkeyp
     )
 
     response = AnthropicLLM(cfg).complete("sys", "user")
+    # Fresh, written, and read tokens all counted rather than silently dropped.
     assert response.input_tokens == 2_000_000
-    # 2M in at $3 + 1M out at $15
-    assert response.cost_usd == pytest.approx(21.00)
+    rate_in = float(cfg.get("llm.anthropic.usd_per_million_input_tokens"))
+    rate_out = float(cfg.get("llm.anthropic.usd_per_million_output_tokens"))
+    assert response.cost_usd == pytest.approx(2 * rate_in + rate_out)
 
 
 # =========================================================================

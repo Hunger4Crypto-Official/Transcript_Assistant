@@ -175,16 +175,32 @@ llm:
     enabled: true
     api_key_env: "ANTHROPIC_API_KEY"
     base_url: "https://api.anthropic.com/v1"
-    model: "claude-sonnet-4-6"
+    model: "claude-opus-5"
     version_header: "2023-06-01"
-    max_tokens: 8000
-    temperature: 0.0
+    # Thinking is on by default on this generation and shares this ceiling with
+    # the response, so a budget sized around the JSON alone truncates mid-object.
+    max_tokens: 16000
+    # NOTE: there is no temperature here and adding one back is a 400, not a
+    # no-op -- the sampling parameters were removed on this generation. It was
+    # pinned to 0.0 for determinism, which it never actually guaranteed; the
+    # output contract in the extraction prompt does that job.
+    #
+    # Reasoning depth, and the cost lever that replaced the token budget:
+    # low | medium | high | xhigh | max. Extraction is a read-and-fill task
+    # against a transcript rather than an open reasoning problem, so it does not
+    # want the ceiling. Raise it if analyses read as shallow on hard recordings.
+    effort: "medium"
+    # Send the profile's system prompt as a cached block. It is byte-identical
+    # across every recording and every episode, so without this the same few
+    # thousand tokens are paid for at full price forever. Cache reads bill at a
+    # fraction of fresh input.
+    cache_system_prompt: true
     timeout_seconds: 180
     max_retries: 4
     is_cloud: true
     # Verify at anthropic.com/pricing.
-    usd_per_million_input_tokens: 3.00
-    usd_per_million_output_tokens: 15.00
+    usd_per_million_input_tokens: 5.00
+    usd_per_million_output_tokens: 25.00
 
   groq:
     enabled: true

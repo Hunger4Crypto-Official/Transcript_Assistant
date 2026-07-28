@@ -43,6 +43,42 @@ Every recording used to be analysed as though it were the first one ever seen.
 - Drafts are redacted unconditionally, diverging from `export` on purpose: a
   draft is outbound by definition.
 
+### The brain, brought up to date
+
+The analysis model was two generations stale, and upgrading it would have failed
+on the first call.
+
+- `claude-opus-5` replaces `claude-sonnet-4-6`, with the rate table updated to
+  match. The pricing tests now read the rates from config instead of restating
+  them, so they stop failing the day a price moves.
+- **No sampling parameter is sent to Anthropic.** `temperature` was pinned to
+  0.0 for determinism it never provided; the current models reject it outright,
+  so it was a 400 waiting for the next model bump rather than a harmless
+  leftover.
+- **The system prompt is cached.** A profile's instructions and schema are
+  identical across every recording and every episode, and were being paid for at
+  full price every time. ADR-030.
+- `max_tokens` raised, because thinking is on by default on this generation and
+  shares that ceiling with the response — the old budget truncated mid-JSON.
+- `effort` is now a config key, and it is the cost lever that replaced the token
+  budget.
+
+**The free Groq key is untouched** — its LLM and its Whisper ASR both keep
+working exactly as before. The sampling parameter was removed on one vendor's
+models, not on every endpoint that speaks the same wire format, and a test now
+fails if anyone "helpfully" strips Groq's too.
+
+### A quote is findable, or it is dropped
+
+`ask` validated its citations. The extractor, which produces the promises that
+flow into memory and the follow-up worklist, was on the honour system — the
+prompt said "the speaker's exact words" and nothing checked.
+
+Now every `quote` field is checked against the text the model was actually shown
+— redacted, when compliance redacted it, since that is all the model could have
+quoted. Case, punctuation, and whitespace are forgiven; different words are not.
+Dropped quotes are counted on the analysis and named in the log. ADR-029.
+
 ### A transcript it was guessing at now says so
 
 Speech recognition does not decline. Given music, a restaurant, or a device in a

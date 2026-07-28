@@ -544,6 +544,58 @@ checking against your own microphone before either number is trusted.
 
 ---
 
+## ADR-029: A quote is findable in the transcript, or it is dropped
+
+**Decision.** Every field the schema types as a `quote` is checked against the
+exact text the model was shown. Anything not present verbatim -- after
+normalising case, punctuation, and whitespace -- is dropped and counted, not
+flagged and kept.
+
+**Why.** This is ADR-024 applied one layer up, and it matters more here. A
+fabricated citation in `ask` sits next to an answer you are already reading
+critically. A fabricated quote is attributed to a named person, flows into the
+memory ledger as something they said, and can surface in a digest a year later
+when the audio is gone. Nothing downstream re-checks it.
+
+Checking against the text the model was **shown** — not the raw transcript — is
+the load-bearing detail. Compliance redacts before the model sees anything, so
+the model can only quote redacted text; validating against the original would
+condemn every legitimate quote from a redacted recording.
+
+**On dropping rather than flagging.** The schema calls the field a quote and the
+prompt demands the speaker's exact words, so a passage that is not present is
+not a quote — it is a paraphrase wearing quotation marks and a timestamp. An
+empty field reads as "nothing worth keeping was said." An invented one reads as
+testimony. Only one of those is recoverable.
+
+---
+
+## ADR-030: The prompt is built so the cache can work
+
+**Decision.** A profile's system prompt, persona, and schema are sent as one
+cached block; the transcript travels in the user turn and never inside it. No
+sampling parameter is sent to Anthropic at all.
+
+**Why.** Caching is a prefix match: the stable half has to come first, and one
+changed byte ahead of the marker invalidates everything after it. The system
+half is byte-identical across every recording and every episode of every
+recording, so without this the same few thousand tokens are paid at full price
+forever. Cache reads bill at a fraction of fresh input.
+
+The sampling parameter is a separate story with the same shape. `temperature`
+was pinned to 0.0 for determinism it never actually provided; on the current
+models it is rejected outright, so it was not a harmless leftover but a 400 on
+the first call after any model upgrade. It is gone, and the output contract in
+the extraction prompt does that job instead.
+
+**Constraint.** This is Anthropic-specific and deliberately not generalised. The
+Groq path keeps its `temperature` and sends no `cache_control` — the parameter
+removal happened on one vendor's models, not on every endpoint that speaks the
+same wire format, and quietly "fixing" the other provider would change its
+behaviour for no reason.
+
+---
+
 ## Known limitations
 
 1. **Crosstalk breaks diarization.** When two people talk over each other,
@@ -585,13 +637,19 @@ checking against your own microphone before either number is trusted.
    calibration: run `speakers identify` on your own audio and read the scores
    before trusting any of it.
 
-9. **The confidence thresholds are unvalidated.** ADR-028 reads the
+9. **Quote verification is exact, not fuzzy.** ADR-029 forgives case,
+   punctuation, and whitespace and nothing else. A model that lightly rewords
+   ("I will" for "I'll") has its quote dropped. That is the intended reading of
+   a field typed `quote`, but it means the count is a measure of paraphrasing as
+   well as of invention.
+
+10. **The confidence thresholds are unvalidated.** ADR-028 reads the
    recogniser's own scores, but `-1.0` and `0.6` are starting points chosen
    from the shape of the distribution, not from your recordings. Run a few real
    files through and compare `open <id> --kind transcript` against the audio
    before trusting either the warnings or their absence.
 
-10. **Crosstalk defeats identification the same way it defeats diarization.** A
+11. **Crosstalk defeats identification the same way it defeats diarization.** A
    cluster containing two overlapping voices embeds to something that is neither
    of them, which the margin guard will usually reject. Usually.
 
