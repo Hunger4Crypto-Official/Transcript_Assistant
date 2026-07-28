@@ -506,6 +506,44 @@ what disappears is a promise you made to a client or a child.
 
 ---
 
+## ADR-028: A transcript the recogniser was guessing at says so first
+
+**Decision.** Every segment's average log probability and no-speech probability
+are read after transcription. A transcript scoring badly is marked, audited, and
+announced in the digest **above** the analysis, and the extraction prompt is
+instructed to prefer empty fields over interpretation. Nothing is deleted and no
+recording is refused.
+
+**Why.** Speech recognition does not decline. Given music, a restaurant, a
+recital, or a device in a pocket, it returns fluent, well-punctuated English
+that nobody said. That is not a rough transcript with mistakes in it; it is
+invented text, identical in shape to the real thing.
+
+That matters more here than it would in a transcription tool, because nothing
+downstream treats the transcript as provisional. The router files it, the
+extractor pulls promises out of it, memory carries those promises into next
+month's prompt, and the worklist puts them in front of you as things you owe a
+client. A hallucinated sentence does not stay a sentence. It becomes a
+commitment you believe you made, six months after the audio is gone.
+
+The scores have been collected since the first version and read by nothing.
+
+**Constraints.** Judgement is weighted by duration, not by segment count: four
+minutes of invented music is one segment and twenty honest interjections are
+twenty, and counting them equally lets the thing that matters lose the vote. A
+transcript with no scores at all -- imported text -- is reported as *unknown*
+rather than clean, because calling it clean claims a check that never ran. The
+warning is placed last in the prompt, beside the instruction, since a caveat
+given as background gets noted and then extracted from confidently anyway.
+
+**What this is not.** It is not a quality gate. A quiet conversation in a car
+scores badly and is still the conversation you wanted, and deciding a recording
+is worthless is not a call to make automatically. The thresholds are guesses
+that have been tuned against nothing; they are config, and they are worth
+checking against your own microphone before either number is trusted.
+
+---
+
 ## Known limitations
 
 1. **Crosstalk breaks diarization.** When two people talk over each other,
@@ -547,7 +585,13 @@ what disappears is a promise you made to a client or a child.
    calibration: run `speakers identify` on your own audio and read the scores
    before trusting any of it.
 
-9. **Crosstalk defeats identification the same way it defeats diarization.** A
+9. **The confidence thresholds are unvalidated.** ADR-028 reads the
+   recogniser's own scores, but `-1.0` and `0.6` are starting points chosen
+   from the shape of the distribution, not from your recordings. Run a few real
+   files through and compare `open <id> --kind transcript` against the audio
+   before trusting either the warnings or their absence.
+
+10. **Crosstalk defeats identification the same way it defeats diarization.** A
    cluster containing two overlapping voices embeds to something that is neither
    of them, which the margin guard will usually reject. Usually.
 

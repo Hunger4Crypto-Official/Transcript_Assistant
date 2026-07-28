@@ -25,6 +25,7 @@ from pathlib import Path
 
 from .asr import transcribe
 from .asr.base import ASRError
+from .asr.confidence import Assessment, assess, prompt_warning
 from .audio import AudioError, AudioPreparer
 from .compliance import ComplianceGate, RetentionSweeper
 from .config import Config
@@ -169,6 +170,18 @@ class Pipeline:
             # leaves a phantom entry in every digest thereafter.
             if rec.transcript is None or not _has_speech(rec.transcript.segments):
                 raise PipelineError("no transcribable content found")
+
+            # Ask the recogniser how much of that it was guessing at, before
+            # anything downstream starts treating it as fact. This stops
+            # nothing: a quiet conversation in a car scores badly and is still
+            # the conversation you wanted. It records the answer so a bad
+            # transcript is read as a bad transcript rather than as testimony.
+            # Imported text has no scores and records "unknown", which is the
+            # honest answer rather than a pass it never earned.
+            verdict = assess(rec.transcript.segments, self.cfg)
+            rec.transcript.confidence_report = verdict.to_dict()
+            if not verdict.believable:
+                self.db.audit("transcript_confidence", verdict.reason[:500], rec.id)
 
             rec.stage = Stage.CORRECTED
             self._route(rec)
@@ -405,7 +418,8 @@ class Pipeline:
             # Insurance Agent prompt.
             prior = carry_forward_brief(self.cfg, profile.id, self.memory)
             analysis: ProfileAnalysis = extract(
-                portion, profile, self.cfg, redacted, local_only=local_only, prior=prior
+                portion, profile, self.cfg, redacted, local_only=local_only, prior=prior,
+                warning=prompt_warning(Assessment.from_dict(rec.transcript.confidence_report)),
             )
             rec.analyses.append(analysis)
             rec.total_cost_usd += analysis.cost_usd

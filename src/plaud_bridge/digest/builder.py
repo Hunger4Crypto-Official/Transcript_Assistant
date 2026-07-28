@@ -25,6 +25,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+from ..asr.confidence import Assessment
 from ..logging_setup import get
 
 log = get("digest")
@@ -224,6 +225,9 @@ class DigestBuilder:
                         "consent": row["consent_status"],
                         "cost": row["total_cost_usd"] or 0.0,
                         "attention": bool(analysis.get("requires_human_attention")),
+                        "shaky": Assessment.from_dict(
+                            (payload.get("transcript") or {}).get("confidence_report")
+                        ).line(),
                         "fields": analysis.get("fields", {}),
                         "error": analysis.get("error") or unopened,
                         "artifacts": payload.get("artifact_paths", {}),
@@ -341,6 +345,13 @@ class DigestBuilder:
                     meta.append(f"consent: {entry['consent'].replace('_', ' ')}")
                 separator = voice.get("digest.entry.meta_separator", "` · `")
                 out += ["`" + separator.join(meta) + "`", ""]
+
+                # Before the analysis, not after it. Everything below this line
+                # was extracted from the transcript, so if the transcript is not
+                # trustworthy that has to be read first rather than discovered
+                # in a footnote after you have believed the summary.
+                if entry["shaky"]:
+                    out += [f"> {entry['shaky']}", ""]
 
                 if entry["attention"]:
                     out += [voice.text("digest.entry.attention_note"), ""]

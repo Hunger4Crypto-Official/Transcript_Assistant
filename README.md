@@ -109,6 +109,34 @@ Other commands:
 `pip install -e .` installs the same commands as `plaud-bridge`, if you would
 rather not type `python run.py` from the project directory.
 
+### When it cannot actually hear anything
+
+Speech recognition does not decline. Given music, a restaurant, a recital, or a
+device that spent an hour in your pocket, Whisper returns fluent, confident,
+well-punctuated English that nobody said. That is its best-documented failure
+mode, and it is not a rough transcript with mistakes in it.
+
+That matters here more than it would in a transcription tool, because nothing
+downstream treats a transcript as provisional. It gets routed, promises get
+extracted from it, memory carries those into next month's prompt, and the
+worklist puts them in front of you as things you owe a client.
+
+So the recogniser's own confidence is read. A transcript it was guessing at is
+marked in the audit log and announced in the digest **above** the analysis —
+everything below that line came out of it — and the extraction prompt is told to
+prefer empty fields over interpretation.
+
+Nothing is deleted and nothing is refused. A quiet conversation in a car scores
+badly and is still the conversation you wanted.
+
+**The thresholds under `asr.confidence` are guesses.** They were chosen from the
+shape of the score distribution, not from your recordings. Run a few real files
+through and read `open <id> --kind transcript` against the audio before trusting
+either the warnings or their absence.
+
+Imported text reports *unknown* rather than clean, because it carries no scores
+and calling it clean would claim a check that never ran.
+
 You can also drop a Plaud-exported **transcript** (`.txt` or `.srt`) into the
 inbox instead of audio. ASR is skipped entirely and everything downstream runs
 normally. That is the cheap path if their transcription is already good enough

@@ -72,7 +72,12 @@ class Segment:
     end: float
     text: str
     speaker: str = "SPEAKER_00"
+    # Average log probability from the recogniser. Clean speech sits above about
+    # -0.5; well below -1.0 the model is guessing at what it heard.
     confidence: float | None = None
+    # The recogniser's own probability that this span held no speech at all.
+    # High no-speech alongside fluent text is the hallucination signature.
+    no_speech: float | None = None
 
     @property
     def duration(self) -> float:
@@ -92,6 +97,7 @@ class Segment:
             text=str(d.get("text", "")),
             speaker=str(d.get("speaker", "SPEAKER_00")),
             confidence=d.get("confidence"),
+            no_speech=d.get("no_speech"),
         )
 
 
@@ -103,6 +109,9 @@ class Transcript:
     asr_model: str = ""
     duration_seconds: float = 0.0
     cost_usd: float = 0.0
+    # How much of this the recogniser appears to have been guessing at. See
+    # asr/confidence.py; empty for imported text, which has nothing to score.
+    confidence_report: dict[str, Any] = field(default_factory=dict)
 
     @property
     def text(self) -> str:
@@ -147,6 +156,7 @@ class Transcript:
             "asr_model": self.asr_model,
             "duration_seconds": self.duration_seconds,
             "cost_usd": self.cost_usd,
+            "confidence_report": self.confidence_report,
         }
 
     @classmethod
@@ -158,6 +168,7 @@ class Transcript:
             asr_model=d.get("asr_model", ""),
             duration_seconds=float(d.get("duration_seconds", 0.0)),
             cost_usd=float(d.get("cost_usd", 0.0)),
+            confidence_report=d.get("confidence_report") or {},
         )
 
 
@@ -300,6 +311,19 @@ class Recording:
                 "duration_seconds": self.transcript.duration_seconds,
                 "cost_usd": self.transcript.cost_usd,
                 "speakers": self.transcript.speakers,
+                # Whether the transcript is trustworthy is metadata about it,
+                # not content, and the digest reads the index rather than
+                # opening the vault -- so dropping this would mean the one
+                # warning that has to be read before the summary is the one
+                # warning an encrypted recording never shows.
+                #
+                # `worst` is the exception: those are verbatim passages, and a
+                # sample of a maximum-sensitivity conversation sitting in a
+                # plain file is the thing this whole method exists to prevent.
+                "confidence_report": {
+                    k: v for k, v in (self.transcript.confidence_report or {}).items()
+                    if k != "worst"
+                },
             }
 
         analyses: list[dict[str, Any]] = []

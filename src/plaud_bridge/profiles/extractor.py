@@ -107,7 +107,8 @@ def _coerce(value: Any, type_name: str) -> Any:
 def extract(transcript: Transcript, profile: Profile, cfg,
             transcript_text: str | None = None,
             local_only: bool | None = None,
-            prior: str = "") -> ProfileAnalysis:
+            prior: str = "",
+            warning: str = "") -> ProfileAnalysis:
     """
     Run one profile's extraction schema over a transcript.
 
@@ -156,7 +157,11 @@ def extract(transcript: Transcript, profile: Profile, cfg,
         f"SCHEMA:\n{_schema_block(profile)}\n\n"
         + (f"{prior.strip()}\n\n" if prior.strip() else "")
         + f"TRANSCRIPT:\n{body}\n\n"
-        "Return the JSON object now."
+        # A reliability caveat placed before the transcript reads as background
+        # and gets noted and then ignored. Last, next to the instruction, it is
+        # part of the task.
+        + (f"{warning.strip()}\n\n" if warning.strip() else "")
+        + "Return the JSON object now."
     )
 
     # This profile's own policy is a floor, never a ceiling. The caller knows

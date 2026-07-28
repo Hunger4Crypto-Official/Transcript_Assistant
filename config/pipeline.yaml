@@ -83,6 +83,31 @@ asr:
     max_retries: 4
     is_cloud: true
 
+  # How much of a transcript the recogniser was guessing at.
+  #
+  # Whisper does not decline. Given a car radio, a restaurant, a recital, or a
+  # device in a pocket, it returns fluent English that nobody said -- and
+  # everything downstream treats the transcript as fact, so an invented sentence
+  # becomes a commitment you believe you made. Nothing here deletes or refuses.
+  # It says so, in the log, in the digest, and in the extraction prompt.
+  confidence:
+    # Average log probability per segment. Clean speech sits above about -0.5;
+    # well below -1.0 the model is guessing. The one most worth moving for your
+    # own microphone -- check `open <id> --kind transcript` against the audio.
+    min_avg_logprob: -1.0
+    # The recogniser's own probability that a span held no speech. High
+    # no-speech alongside fluent text is the hallucination signature.
+    max_no_speech_prob: 0.6
+    # Share of scored speech below those lines before the transcript is called
+    # shaky, and before it is called untrustworthy. Weighted by duration, so
+    # four minutes of invented music does not hide behind a crowd of real
+    # two-second replies.
+    suspect_share: 0.30
+    unreliable_share: 0.60
+    # Too little speech to judge. Calling a ten second note unreliable on two
+    # shaky segments is noise rather than a warning.
+    min_seconds: 20.0
+
   local:
     enabled: true
     # pip install faster-whisper

@@ -43,6 +43,31 @@ Every recording used to be analysed as though it were the first one ever seen.
 - Drafts are redacted unconditionally, diverging from `export` on purpose: a
   draft is outbound by definition.
 
+### A transcript it was guessing at now says so
+
+Speech recognition does not decline. Given music, a restaurant, or a device in a
+pocket it returns fluent English that nobody said -- and everything here treated
+the transcript as fact, so an invented sentence became a promise the worklist
+put in front of you.
+
+Every segment has carried a confidence score since the first version and nothing
+read it. Now the pipeline does, along with the recogniser's own estimate that a
+span held no speech at all, which is the signature that catches the confident
+inventions the log probability alone misses.
+
+- A bad transcript is marked, audited, and announced in the digest **above** the
+  analysis, because everything below that line came out of it.
+- The extraction prompt is told to prefer empty fields, last, beside the
+  instruction -- a caveat given as background gets noted and ignored.
+- Weighted by duration, so four minutes of invented music cannot hide behind a
+  crowd of real two-second replies.
+- Imported text reports *unknown*, not clean. It has no scores, and calling it
+  clean would claim a check that never ran.
+- Nothing is deleted or refused. A quiet conversation in a car scores badly and
+  is still the conversation you wanted. See ADR-028.
+
+The thresholds are guesses. Check them against your own microphone.
+
 ### Two things the new features quietly broke, found afterwards
 
 - `verify` reported voiceprints, saved answers, and drafts as "files on disk

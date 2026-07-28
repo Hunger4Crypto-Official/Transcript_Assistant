@@ -89,6 +89,7 @@ class GroqASR(ASRProvider):
                     end=float(raw.get("end", 0.0)) + offset,
                     text=text,
                     confidence=raw.get("avg_logprob"),
+                    no_speech=raw.get("no_speech_prob"),
                 )
             )
 
