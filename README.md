@@ -623,3 +623,12 @@ the spine, `test_cost_and_audit.py` for the spend ceiling and the audit trail,
 raises and the transcript is simply missing words — and
 `test_voice_and_templates.py`, which includes the check that no voice pack can
 talk the digest into printing a suppressed field.
+
+## License
+
+This is proprietary software. Copyright (c) 2026 Hunger4Crypto
+(hunger4crypto@gmail.com); all rights reserved. It is published for the owner's
+own reference only — it is **not** open source, and no right to use, copy, run,
+modify, or distribute it is granted to anyone else. See [LICENSE](LICENSE) for
+the full terms. Being able to see this repository does not grant a license to
+use it.

@@ -8,11 +8,13 @@ version = "1.0.0"
 description = "Turn Plaud recorder exports into transcripts, per-profile analysis, and a digest, without the audio leaving your machine."
 readme = "README.md"
 requires-python = ">=3.10"
+license = { text = "Proprietary — All rights reserved. See LICENSE." }
 keywords = ["transcription", "whisper", "plaud", "compliance", "privacy"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Environment :: Console",
     "Intended Audience :: End Users/Desktop",
+    "License :: Other/Proprietary License",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
