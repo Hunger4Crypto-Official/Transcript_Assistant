@@ -524,6 +524,12 @@ def set_status(cfg, vault: Vault, followup_id: str, status: str, *,
     entry.update({
         "status": status,
         "recording_id": match.recording_id,
+        # The full set of recordings this commitment was seen in, not just the
+        # primary. Forgetting one of several must not delete a done/dropped
+        # status and let the commitment re-derive as open from the recordings
+        # that remain -- so the whole set is stored, and forget_recording trims
+        # rather than drops while any of them survive.
+        "recording_ids": list(match.recording_ids) or [match.recording_id],
         "profile_id": match.profile_id,
         "first_seen": match.first_seen or entry.get("first_seen", ""),
         "last_seen": match.last_seen or entry.get("last_seen", ""),
@@ -558,20 +564,37 @@ def forget_recording(cfg, vault: Vault, recording_id: str) -> list[str]:
         return []
 
     saved = _load_state(cfg, vault)
-    removed = [
-        fid for fid, entry in saved.items()
-        if str(entry.get("recording_id", "")) == recording_id
-    ]
-    if not removed:
-        return []
+    removed: list[str] = []
+    changed = False
+    for fid, entry in list(saved.items()):
+        ids = entry.get("recording_ids") or (
+            [entry["recording_id"]] if entry.get("recording_id") else []
+        )
+        if recording_id not in ids:
+            continue
+        remaining = [r for r in ids if r != recording_id]
+        changed = True
+        if not remaining:
+            # Every recording this status came from is gone; the commitment
+            # cannot re-derive, so the status goes with it.
+            saved.pop(fid, None)
+            removed.append(fid)
+        else:
+            # The commitment still exists via another recording, so its status
+            # is preserved -- it just stops naming the forgotten one.
+            entry["recording_ids"] = remaining
+            if str(entry.get("recording_id", "")) == recording_id:
+                entry["recording_id"] = remaining[0]
+            saved[fid] = entry
 
-    for fid in removed:
-        saved.pop(fid, None)
+    if not changed:
+        return []
     _save_state(cfg, vault, saved)
-    log.info(
-        "follow-ups: dropped %d status entr%s tied to %s",
-        len(removed), "y" if len(removed) == 1 else "ies", recording_id,
-    )
+    if removed:
+        log.info(
+            "follow-ups: dropped %d status entr%s tied to %s",
+            len(removed), "y" if len(removed) == 1 else "ies", recording_id,
+        )
     return removed
 
 

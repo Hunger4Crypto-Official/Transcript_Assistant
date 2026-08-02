@@ -279,6 +279,11 @@ class DigestBuilder:
         ]
         actions: list[tuple[str, str, str]] = []
         for section in sections:
+            # A profile can suppress next_action like any other field, and a
+            # suppressed field must not render anywhere -- not here at the top of
+            # the digest either. The per-recording loop below honours it too.
+            if "next_action" in self.cfg.profile(section.profile_id).suppress_fields:
+                continue
             for entry in section.entries:
                 na = entry["fields"].get("next_action")
                 if isinstance(na, str) and na.strip() and na.strip().lower() not in ("none", "n/a"):
@@ -386,7 +391,8 @@ class DigestBuilder:
                         ), ""]
 
                 na = entry["fields"].get("next_action")
-                if isinstance(na, str) and na.strip():
+                if ("next_action" not in profile.suppress_fields
+                        and isinstance(na, str) and na.strip()):
                     out += [voice.text("digest.entry.next_action", action=na.strip()), ""]
 
                 if opts.include_links and entry["artifacts"]:

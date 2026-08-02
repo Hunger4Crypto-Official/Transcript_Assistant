@@ -235,3 +235,25 @@ def test_force_reprocess_purges_a_prior_runs_files(sandbox):
         assert not stale.exists(), "a --force reprocess left a prior run's plaintext on disk"
     finally:
         pipe.close()
+
+
+def test_a_suppressed_next_action_never_renders(sandbox):
+    """
+    suppress_fields must keep a field out of the digest entirely. next_action is
+    rendered from two places -- the top-of-digest 'needs you' actions and each
+    recording's own block -- and both must honour suppression, or a profile that
+    hides next_action still leaks it.
+    """
+    cfg, _ = sandbox
+    _drop(cfg, "client-marcus.txt", CLIENT_CALL)
+    pipe = Pipeline(cfg)
+    try:
+        pipe.run()
+        prof = cfg.profile("insurance_agent")
+        prof.suppress_fields = list(prof.suppress_fields) + ["next_action"]
+        md = DigestBuilder(cfg, pipe.db).render_markdown(DigestOptions(days=30))
+        assert "Send two quote options by Thursday" not in md, (
+            "a suppressed next_action still rendered into the digest"
+        )
+    finally:
+        pipe.close()

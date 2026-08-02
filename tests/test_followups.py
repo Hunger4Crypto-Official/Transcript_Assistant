@@ -365,6 +365,33 @@ def test_a_failed_analysis_contributes_nothing(bench):
     assert bench.collect() == []
 
 
+def test_forgetting_one_of_several_recordings_keeps_a_done_status(bench):
+    """
+    A commitment mentioned in two recordings collapses to one item whose state
+    now stores both. Forgetting the earliest -- merely its primary mention --
+    must not un-complete it: the commitment still exists via the other recording,
+    so its done status is preserved rather than resurrecting as open.
+    """
+    from plaud_bridge.followups import forget_recording
+
+    fields = {"commitments_by_producer": [quote(PRODUCER_PROMISE)]}
+    bench.add("rec_a", "insurance_agent", fields, days_ago=10)
+    bench.add("rec_b", "insurance_agent", fields, days_ago=1)
+
+    items = bench.collect()
+    assert len(items) == 1 and set(items[0].recording_ids) == {"rec_a", "rec_b"}
+    assert items[0].recording_id == "rec_a", "the earliest mention should be the primary"
+    set_status(bench.cfg, bench.vault, items[0].id, "done", items=items)
+
+    # Forget the earliest recording: drop it from the index and the state.
+    forget_recording(bench.cfg, bench.vault, "rec_a")
+    bench.db.delete_recording("rec_a")
+
+    again = bench.collect()
+    assert len(again) == 1, "the commitment should still exist via rec_b"
+    assert again[0].status == "done", "a completed commitment resurrected as open after forget"
+
+
 def test_a_scoped_query_does_not_leak_a_co_routed_personal_commitment(bench):
     """
     `db.query(profile_id=X)` joins on routes, so a recording co-routed to a work
