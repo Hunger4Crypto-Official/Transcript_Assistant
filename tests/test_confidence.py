@@ -189,7 +189,10 @@ def test_the_warning_is_an_instruction_not_a_footnote(sandbox):
 
     body = seen["user"]
     assert "TRANSCRIPT RELIABILITY" in body
-    assert body.index("TRANSCRIPT RELIABILITY") > body.index("TRANSCRIPT:")
+    # After the transcript block, not before it: a caveat ahead of the transcript
+    # reads as background. The transcript is fenced, so "after" means after the
+    # closing marker.
+    assert body.index("TRANSCRIPT RELIABILITY") > body.index("<<<END TRANSCRIPT>>>")
     assert body.rstrip().endswith("Return the JSON object now.")
 
 
