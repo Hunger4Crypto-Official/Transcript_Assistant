@@ -215,6 +215,44 @@ def test_the_withheld_index_leaks_no_transcript_derived_string():
     assert "biopsy results" in clear and "elimination period" in clear
 
 
+class WorkOnlyRouterStub(StubLLM):
+    """Insists every recording is low-sensitivity work, whatever it contains."""
+
+    def __call__(self, cfg, system, user, local_only=False, max_tokens=None):
+        if '"scores"' in user:
+            self.calls.append({"local_only": local_only, "kind": "route"})
+            return {"scores": [
+                {"profile_id": "father", "score": 0.03, "evidence": []},
+                {"profile_id": "husband", "score": 0.03, "evidence": []},
+                {"profile_id": "sales_trainer", "score": 0.40, "evidence": ["debrief"]},
+                {"profile_id": "insurance_agent", "score": 0.03, "evidence": []},
+            ]}, self._response()
+        self.calls.append({"local_only": local_only, "kind": "extract"})
+        return {"requires_human_attention": False}, self._response()
+
+
+def test_a_strong_family_keyword_match_cannot_be_scored_away(tmp_path, monkeypatch):
+    """
+    Missing a family recording is the asymmetric failure the tool exists to
+    prevent: it could hand that conversation to a cloud model. A transcript dense
+    with Father keywords, where the model insists it is work, must still route to
+    Father -- the locked-profile keyword floor holds the line the model tried to
+    talk past.
+    """
+    from plaud_bridge.profiles.router import route
+
+    cfg, _ = build_sandbox(tmp_path, monkeypatch, stub=WorkOnlyRouterStub())
+    segments = [Segment(i * 4.0, i * 4.0 + 4.0, line, "Sasson")
+                for i, line in enumerate(FAMILY_DINNER.strip().splitlines())]
+    result = route(Transcript(segments=segments), cfg)
+
+    routed = {m.profile_id for m in result.matches}
+    assert "father" in routed, (
+        "a family recording the keywords matched was dropped because the model "
+        "scored it as work; the locked-profile keyword floor did not hold"
+    )
+
+
 def test_encryption_at_rest_is_a_floor_not_a_routing_preference(tmp_path, monkeypatch):
     """
     strictest_profile_governs is a routing preference; encryption at rest is a

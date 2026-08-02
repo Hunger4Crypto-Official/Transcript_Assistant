@@ -181,6 +181,18 @@ def route(transcript: Transcript, cfg, local_only: bool = False) -> RoutingResul
         # rather than being scaled down into never clearing the threshold.
         confidence = (kw_weight * kw + (1 - kw_weight) * llm) if use_llm else kw
 
+        # A keyword floor for the locked profiles. Missing a family or spousal
+        # recording is the asymmetric failure this whole tool exists to prevent
+        # -- it means that conversation could be handed to a cloud model or kept
+        # in the clear. So for a profile that forbids cloud processing, a keyword
+        # match strong enough to clear the bar on its own is not allowed to be
+        # averaged away by a low LLM score: the model can add to a locked
+        # profile's confidence but never score it below what its own keywords
+        # earned. An adversarial transcript that talks the model down cannot use
+        # that to smuggle a family conversation past the local-only gate.
+        if (profile.hard_local_only or not profile.allow_cloud_llm) and kw >= profile.min_confidence:
+            confidence = max(confidence, kw)
+
         if confidence >= profile.min_confidence:
             matches.append(
                 RouteMatch(
