@@ -215,6 +215,32 @@ def test_the_withheld_index_leaks_no_transcript_derived_string():
     assert "biopsy results" in clear and "elimination period" in clear
 
 
+def test_encryption_at_rest_is_a_floor_not_a_routing_preference(tmp_path, monkeypatch):
+    """
+    strictest_profile_governs is a routing preference; encryption at rest is a
+    floor. With the flag off and a work profile leading the routing, a recording
+    co-routed to a locked personal profile must still be encrypted -- otherwise
+    a Husband conversation lands in the plaintext index because a sales debrief
+    happened to sort first. The locality floor already ignores this flag.
+    """
+    from plaud_bridge.compliance.gate import ComplianceGate
+    from plaud_bridge.models import Recording, RouteMatch
+
+    cfg, _ = build_sandbox(tmp_path, monkeypatch,
+                           overrides={"compliance": {"strictest_profile_governs": False}})
+    rec = Recording(source_name="x.txt", kind="text")
+    rec.transcript = Transcript(segments=[Segment(0.0, 2.0, "hi", "Sasson")])
+    rec.routes = [RouteMatch(profile_id="sales_trainer", confidence=0.95),
+                  RouteMatch(profile_id="husband", confidence=0.90)]
+
+    verdict = ComplianceGate(cfg).evaluate(rec)
+    assert verdict.governing_profile == "sales_trainer", "the flag-off preference did not take effect"
+    assert verdict.encrypt_at_rest is True, (
+        "a Husband-co-routed recording was left unencrypted because a work "
+        "profile led the routing"
+    )
+
+
 # =========================================================================
 # Consent
 # =========================================================================
