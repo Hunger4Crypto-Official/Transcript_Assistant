@@ -201,3 +201,37 @@ def test_digest_surfaces_next_actions_at_the_top(sandbox):
         assert "Send two quote options by Thursday" in needs
     finally:
         pipe.close()
+
+
+def test_force_reprocess_purges_a_prior_runs_files(sandbox):
+    """
+    Reprocessing can move a recording from the plaintext outbox into the vault,
+    or send it to quarantine so it never persists at all, and the previous run's
+    files do not move themselves. A --force run clears them first; otherwise a
+    re-encrypted recording leaves its old plaintext copy on disk, which is the
+    exact thing the encryption existed to prevent.
+    """
+    cfg, _ = sandbox
+    _drop(cfg, "client-marcus.txt", CLIENT_CALL)
+    pipe = Pipeline(cfg)
+    try:
+        pipe.run()
+        rec_id = pipe.db.query()[0]["id"]
+
+        # Plant the kind of file a prior run under a plaintext profile would have
+        # stranded: a plaintext transcript in the outbox, indexed to this id.
+        stale = cfg.path("outbox") / f"{rec_id}.old-transcript.md"
+        stale.parent.mkdir(parents=True, exist_ok=True)
+        stale.write_text("Marcus: the mortgage is about four hundred thousand\n",
+                         encoding="utf-8")
+        pipe.db.record_artifact(rec_id, "stale_transcript", str(stale), False, None)
+        assert stale.exists()
+
+        # The original was archived out of the inbox on the first run; re-drop it
+        # so the forced run has something to reprocess.
+        _drop(cfg, "client-marcus.txt", CLIENT_CALL)
+        pipe.run(force=True)
+
+        assert not stale.exists(), "a --force reprocess left a prior run's plaintext on disk"
+    finally:
+        pipe.close()

@@ -153,6 +153,15 @@ class Pipeline:
             # flag had done. The folder that survived belonged to a recording no
             # index knew about, which is the one state nothing can clean up.
             rec.id = existing
+            # And remove the previous run's files before the new one starts.
+            # Reprocessing can change where this recording is stored -- a profile
+            # change moves it from the plaintext outbox into the vault, a consent
+            # change sends it to quarantine and it never persists at all -- and
+            # the old files do not move themselves. Without this a --force that
+            # re-encrypts a recording leaves the old plaintext transcript sitting
+            # in the outbox, which is the exact copy the encryption existed to
+            # prevent.
+            self._purge_prior_artifacts(rec.id, keep=path)
         self.db.audit("ingest", f"{path.name} ({stat.st_size} bytes)", rec.id)
         log.info("processing %s (%s, %.1fMB)", path.name, kind, stat.st_size / 1_048_576)
 
@@ -466,6 +475,57 @@ class Pipeline:
             self.memory.update_from_record(rec)
         except Exception as exc:  # noqa: BLE001 - memory is a convenience, not the product
             log.warning("could not update memory for %s: %s", rec.id, exc)
+
+    def _purge_prior_artifacts(self, recording_id: str, keep: Path | None = None) -> None:
+        """
+        Delete a previous run's files before --force reprocesses the same id.
+
+        Only files inside our own data directories are touched, and `keep` (the
+        inbox file being processed right now) is never removed. The artifact rows
+        are dropped too, so a reprocess that ends in quarantine does not leave the
+        index pointing at files that are no longer there.
+        """
+        from .archive import is_owned, owned_roots
+
+        roots = owned_roots(self.cfg)
+        keep_resolved = keep.resolve() if keep else None
+
+        payload = self.db.load(recording_id) or {}
+        paths: set[str] = {str(v) for v in (payload.get("artifact_paths") or {}).values()}
+        kinds: set[str] = set()
+        for art in self.db.all_artifacts():
+            if art["recording_id"] == recording_id:
+                paths.add(art["path"])
+                kinds.add(art["kind"])
+
+        processed = self.cfg.path("inbox") / "_processed"
+        if processed.is_dir():
+            paths.update(str(p) for p in processed.glob(f"{recording_id}_*"))
+
+        removed = 0
+        for value in paths:
+            p = Path(value)
+            try:
+                if p.resolve() == keep_resolved:
+                    continue
+                if p.exists() and is_owned(p, roots):
+                    p.unlink()
+                    removed += 1
+            except OSError as exc:
+                log.warning("could not remove prior artifact %s: %s", p, exc)
+
+        for kind in kinds:
+            self.db.drop_artifact(recording_id, kind)
+
+        qdir = self.cfg.path("quarantine") / recording_id
+        if qdir.is_dir():
+            shutil.rmtree(qdir, ignore_errors=True)
+
+        if removed:
+            log.info("reprocess: cleared %d prior artifact file(s) for %s", removed, recording_id)
+            self.db.audit(
+                "reprocess_purge", f"removed {removed} prior artifact file(s)", recording_id
+            )
 
     def _persist(self, rec: Recording) -> None:
         governing = self.cfg.profile(rec.compliance.governing_profile or "unfiled")
