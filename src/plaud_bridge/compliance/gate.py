@@ -131,7 +131,25 @@ class ComplianceGate:
                 self.window,
                 owner_label=self.cfg.get("diarization.owner_label"),
             )
-            if result.complete:
+            if result.refused:
+                # A refusal is categorically different from missing consent, and
+                # it quarantines unconditionally -- the on_missing_consent setting
+                # governs silence, not an objection. Letting a config flag wave a
+                # refusal through is exactly what the consent module warns against.
+                # The verbatim words go in consent_quote, which the index withholds
+                # for an encrypted recording; the reason carries none of them.
+                verdict.consent = ConsentStatus.REFUSED
+                verdict.consent_quote = result.refusal_quote
+                verdict.allow = False
+                verdict.reasons.append(
+                    "QUARANTINED. A party objected to being recorded in the opening "
+                    "window. A refusal is not overridden by compliance."
+                    "on_missing_consent; if consent was not obtained, the answer is "
+                    "not a config change."
+                )
+                log.warning("quarantined for an explicit recording refusal: %s",
+                            rec.source_name)
+            elif result.complete:
                 verdict.consent = ConsentStatus.DETECTED
                 verdict.consent_quote = result.announce_quote
                 verdict.consent_timestamp = result.timestamp

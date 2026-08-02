@@ -306,6 +306,74 @@ def test_a_refusal_is_not_treated_as_consent(tmp_path, monkeypatch):
         pipe.close()
 
 
+def test_a_refusal_quarantines_even_when_missing_consent_is_only_flagged(tmp_path, monkeypatch):
+    """
+    compliance.on_missing_consent governs SILENCE -- nobody said either way. An
+    explicit objection is not silence: a refusal quarantines unconditionally,
+    even with the gate set only to flag missing consent. A config flag must not
+    wave a refusal through.
+    """
+    cfg, _ = build_sandbox(tmp_path, monkeypatch,
+                           overrides={"compliance": {"on_missing_consent": "flag"}})
+    drop(cfg, "client-refused.txt", REFUSAL)
+
+    pipe = Pipeline(cfg)
+    try:
+        stats = pipe.run()
+        assert stats.quarantined == 1, "a refusal was flagged instead of quarantined"
+        assert stats.processed == 0
+    finally:
+        pipe.close()
+
+
+def test_a_refusal_does_not_write_the_refusers_words_to_the_plaintext_index(tmp_path, monkeypatch):
+    """
+    The refusal reason is written to the plaintext audit table and the quarantine
+    WHY.md. It must carry none of the verbatim objection -- that would put
+    transcript speech in the clear. The words live only in the withheld
+    consent_quote.
+    """
+    cfg, _ = build_sandbox(tmp_path, monkeypatch)
+    drop(cfg, "client-refused.txt", REFUSAL)
+
+    pipe = Pipeline(cfg)
+    try:
+        pipe.run()
+    finally:
+        pipe.close()
+
+    needle = b"really don't want this being recorded"
+    assert needle not in cfg.path("database").read_bytes(), (
+        "the refuser's verbatim words reached the plaintext index"
+    )
+    why = cfg.path("quarantine")
+    leaked = [p for p in why.rglob("WHY.md") if needle in p.read_bytes()]
+    assert not leaked, "the refuser's verbatim words reached a plaintext WHY.md"
+
+
+def test_consent_notes_never_carry_the_verbatim_speech():
+    """
+    The notes flow into verdict.reasons, which are written to the plaintext audit
+    trail and WHY.md. Neither a refusal note nor an announced-by-other note may
+    carry the words; those live in the dedicated (withheld) quote fields.
+    """
+    from plaud_bridge.compliance.consent import detect_consent
+
+    refusal = [Segment(0.0, 4.0, "Honestly I really don't want this being recorded.", "Marcus")]
+    r1 = detect_consent(Transcript(segments=refusal), 90.0, owner_label="Sasson")
+    assert r1.refused and r1.refusal_quote, "the refusal and its quote must still be captured"
+    assert "really don't want" not in " ".join(r1.notes), "a note leaked the verbatim refusal"
+
+    other = [
+        Segment(0.0, 4.0, "Morning.", "Sasson"),
+        Segment(4.0, 8.0, "Just so you know, I am recording this call on my end.", "Marcus"),
+    ]
+    r2 = detect_consent(Transcript(segments=other), 90.0, owner_label="Sasson")
+    assert "recording this call on my end" not in " ".join(r2.notes), (
+        "a note leaked the other party's verbatim announcement"
+    )
+
+
 @pytest.mark.parametrize("body,expected", [
     ("Sasson: I record these calls for my notes, is that okay?\n"
      "Marcus: Yeah that's fine.\n", True),

@@ -62,6 +62,10 @@ class ConsentStatus(str, Enum):
     NOT_DETECTED = "not_detected"
     NOT_REQUIRED = "not_required"
     WAIVED = "waived"
+    # A party actively objected to being recorded. Distinct from NOT_DETECTED
+    # (nobody said anything either way): a refusal quarantines unconditionally,
+    # and the stored status must be able to say which of the two happened.
+    REFUSED = "refused"
 
 
 @dataclass
