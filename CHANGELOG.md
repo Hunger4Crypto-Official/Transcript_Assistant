@@ -43,6 +43,25 @@ Every recording used to be analysed as though it were the first one ever seen.
 - Drafts are redacted unconditionally, diverging from `export` on purpose: a
   draft is outbound by definition.
 
+### The inbox takes what note takers actually produce
+
+"Works with your recorder" and "works with everything that records" are
+different products, and the difference was an extension list and a parser.
+
+- WebVTT is now a first-class transcript format — Zoom, Teams, Fireflies,
+  tl;dv, and YouTube all export it. Header, NOTE, STYLE, and cue-identifier
+  handling included, hourless timestamps and comma milliseconds tolerated,
+  markup stripped.
+- **Teams voice tags become named speakers.** `<v Marcus Reed>` is the platform
+  stating who spoke from its own per-participant channels, so it is treated as
+  authoritative and flows into the stored transcript unchanged — named speakers
+  with no diarization, no enrollment, and no model.
+- The audio list grew from five extensions to fifteen: phone memos (`.m4a`
+  `.m4b`), WhatsApp and Telegram voice notes (`.opus` `.oga` `.amr`), and
+  meeting recordings (`.mp4` `.mov` `.webm`, audio extracted). ffmpeg already
+  normalised any container; the extension list was the only gate.
+- Unsupported files are still refused by name, never silently ignored.
+
 ### The brain, brought up to date
 
 The analysis model was two generations stale, and upgrading it would have failed

@@ -1,8 +1,14 @@
 # Plaud Bridge
 
-Takes audio exported from a Plaud recorder and turns it into transcripts,
-per-profile analysis, and a digest you can read or filter. Runs on your machine.
-Nothing about a family conversation ever leaves it.
+Takes audio or transcripts from any recorder or note-taking app — Plaud, a
+phone's voice memos, Zoom, Teams, WhatsApp voice notes, or typed markdown — and
+turns them into transcripts, per-profile analysis, and a digest you can read or
+filter. Runs on your machine. Nothing about a family conversation ever leaves
+it.
+
+The name stays: it was born to serve a Plaud recorder, and renaming a tool
+because it learned to eat more formats would churn every config and environment
+variable for a sentimentality nobody asked for.
 
 Four profiles ship configured: **Insurance Agent**, **Sales Trainer**,
 **Father**, **Husband**, plus an **Unfiled** catch-all.
@@ -137,10 +143,32 @@ either the warnings or their absence.
 Imported text reports *unknown* rather than clean, because it carries no scores
 and calling it clean would claim a check that never ran.
 
-You can also drop a Plaud-exported **transcript** (`.txt` or `.srt`) into the
-inbox instead of audio. ASR is skipped entirely and everything downstream runs
-normally. That is the cheap path if their transcription is already good enough
-for you, and it is worth benchmarking before you commit to running your own ASR.
+### From any recorder or app
+
+The inbox takes what note-taking tools actually hand you, not just what one
+brand exports:
+
+| You have | Drop in the inbox |
+|---|---|
+| Plaud / Otter export | `.mp3` `.wav` `.txt` `.srt` |
+| Apple Voice Memos, Google Recorder | `.m4a` |
+| WhatsApp / Telegram voice note | `.opus` `.oga` `.amr` |
+| Zoom / Teams / Meet **recording** | `.mp4` `.mov` `.webm` — the audio track is extracted |
+| Zoom / Teams / Fireflies / YouTube **transcript** | `.vtt` |
+| Typed or pasted notes | `.txt` `.md` |
+
+Transcripts skip ASR entirely and everything downstream runs normally — the
+cheap path when the exporting tool's transcription is already good enough, and
+worth benchmarking before you commit to running your own.
+
+One format is better than it looks: **Teams-style `.vtt` arrives with named
+speakers.** Its `<v Name>` voice tags are the meeting platform stating who
+spoke, from its own per-participant audio channels, and that attribution flows
+through unchanged — no diarization, no enrollment, no model involved.
+
+Anything with an extension nobody's recorder produces is refused by name rather
+than silently ignored, and adding a format is one line in `pipeline.yaml`:
+ffmpeg normalises any container, so the extension list is the only gate.
 
 ---
 

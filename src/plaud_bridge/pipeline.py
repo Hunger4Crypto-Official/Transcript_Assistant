@@ -252,7 +252,7 @@ class Pipeline:
             self.db.audit("glossary", report.summary(), rec.id)
 
     def _load_text(self, rec: Recording, path: Path) -> None:
-        """Accept a Plaud-exported transcript directly, skipping ASR entirely."""
+        """Accept an exported transcript directly, skipping ASR entirely."""
         # utf-8-sig strips the byte order mark other tools leave at the front.
         # Without it the first speaker's name carries an invisible character,
         # which is enough to stop the speaker-label heuristics recognising it —
@@ -737,16 +737,115 @@ def _confirmed_speakers(lines: list[str]) -> set[str]:
     return confirmed
 
 
+# WebVTT allows hourless timestamps and either separator for milliseconds,
+# because Zoom writes 00:04.000 where Teams writes 00:00:04.000 and at least
+# one exporter in the wild uses the SRT comma.
+_VTT_STAMP_RE = re.compile(
+    r"(?:(\d{1,3}):)?(\d{1,2}):(\d{2})[.,](\d{3})\s*-->\s*"
+    r"(?:(\d{1,3}):)?(\d{1,2}):(\d{2})[.,](\d{3})"
+)
+# <v Marcus Reed>, <v.loud Marcus>, case-insensitive because exporters vary.
+_VTT_VOICE_RE = re.compile(r"<v(?:\.[^ >]*)?\s+(?P<name>[^>]+)>", re.IGNORECASE)
+# Everything else in angle brackets: </v>, <c>, <i>, inline <00:00:01.000> cues.
+_VTT_TAG_RE = re.compile(r"</?[^>]*>")
+
+
+def _vtt_seconds(hours: str | None, minutes: str, seconds: str, millis: str) -> float:
+    return int(hours or 0) * 3600 + int(minutes) * 60 + int(seconds) + int(millis) / 1000.0
+
+
+def _parse_vtt(raw: str) -> list[Segment]:
+    """
+    Parse WebVTT, the format every meeting tool actually exports.
+
+    Zoom, Teams, Fireflies, tl;dv, and YouTube all hand you .vtt, so accepting
+    it is the difference between "works with your recorder" and "works with
+    everything that records". Two things distinguish it from SRT beyond the
+    header: cue text may carry markup, and Teams wraps each utterance in a
+    <v Speaker Name> voice tag.
+
+    The voice tag is treated as authoritative. It is the meeting platform
+    stating who spoke -- from its own per-participant audio channels -- not a
+    heuristic guessing from a "Name:" prefix. That attribution flows through
+    unchanged, which means a Teams export arrives with named speakers without
+    diarization, enrollment, or any model at all.
+    """
+    bodies: list[tuple[float, float, str | None, str]] = []
+
+    for block in re.split(r"\n\s*\n", raw.lstrip("\ufeff").strip()):
+        lines = block.strip().splitlines()
+        if not lines:
+            continue
+        # Header and non-cue blocks. NOTE and STYLE bodies can contain almost
+        # anything, including things that look like cues, so the whole block
+        # goes rather than its individual lines.
+        if lines[0].split(" ")[0] in ("WEBVTT", "NOTE", "STYLE", "REGION"):
+            continue
+
+        stamp_at, match = None, None
+        for index, line in enumerate(lines):
+            match = _VTT_STAMP_RE.search(line)
+            if match:
+                stamp_at = index
+                break
+        if stamp_at is None or match is None:
+            continue
+        g = match.groups()
+        start = _vtt_seconds(g[0], g[1], g[2], g[3])
+        end = _vtt_seconds(g[4], g[5], g[6], g[7])
+
+        # Text is whatever follows the timestamp line. Taking "lines after the
+        # stamp" rather than "lines that are not stamps" is what drops the
+        # optional cue identifier, which may be a bare number or any string.
+        text = " ".join(ln.strip() for ln in lines[stamp_at + 1:]).strip()
+        if not text:
+            continue
+
+        voices = list(_VTT_VOICE_RE.finditer(text))
+        if voices:
+            # A cue can carry several voices; each becomes its own segment so
+            # a two-person exchange inside one cue does not merge into one
+            # speaker's mouth.
+            for index, voice in enumerate(voices):
+                until = voices[index + 1].start() if index + 1 < len(voices) else len(text)
+                spoken = _VTT_TAG_RE.sub("", text[voice.end():until]).strip()
+                if spoken:
+                    bodies.append((start, end, voice.group("name").strip(), spoken))
+        else:
+            spoken = _VTT_TAG_RE.sub("", text).strip()
+            if spoken:
+                bodies.append((start, end, None, spoken))
+
+    # Cues without a voice tag still get the "Name: text" heuristic, under the
+    # same confirmation rules as SRT, so an Otter export is not worse off for
+    # having been converted to VTT somewhere along the way.
+    confirmed = _confirmed_speakers([b[3] for b in bodies if b[2] is None])
+    segments: list[Segment] = []
+    for start, end, stated, text in bodies:
+        if stated is not None:
+            segments.append(Segment(start, end, text, stated))
+            continue
+        speaker = "SPEAKER"
+        split = _speaker_split(text)
+        if split and split[0] in confirmed:
+            speaker, text = split
+        segments.append(Segment(start, end, text, speaker))
+    return segments
+
+
 def _parse_text_transcript(raw: str, suffix: str) -> list[Segment]:
     """
-    Parse a Plaud-exported transcript.
+    Parse a transcript exported by whatever tool made it.
 
-    SRT gives real timestamps. Plain text does not, so we synthesise a rough
-    timeline at an average speaking rate. Those timestamps are approximations
-    and are labelled as such; do not quote them as evidence of when something
-    was said.
+    SRT and VTT give real timestamps. Plain text does not, so we synthesise a
+    rough timeline at an average speaking rate. Those timestamps are
+    approximations and are labelled as such; do not quote them as evidence of
+    when something was said.
     """
     segments: list[Segment] = []
+
+    if suffix == ".vtt":
+        return _parse_vtt(raw)
 
     if suffix == ".srt":
         blocks = re.split(r"\n\s*\n", raw.strip())

@@ -8,7 +8,7 @@
 version: 1
 
 paths:
-  # Drop exported Plaud audio (.mp3/.wav) or transcripts (.txt/.srt) here.
+  # Drop audio or transcripts from any recorder or note app here.
   inbox: "./data/inbox"
   # Working scratch. Safe to delete. Rebuilt on demand.
   work: "./data/work"
@@ -24,9 +24,23 @@ paths:
   logs: "./data/logs"
 
 ingest:
-  # Accepted extensions. Audio goes through ASR; text skips straight to analysis.
-  audio_extensions: [".mp3", ".wav", ".m4a", ".flac", ".ogg"]
-  text_extensions: [".txt", ".srt", ".md"]
+  # Accepted extensions. Audio goes through ASR; text skips straight to
+  # analysis. This list is the only gate on the audio side -- ffmpeg normalises
+  # everything to 16k mono WAV regardless of container, so adding a format here
+  # is all it takes to support it.
+  #
+  # The set below covers what note-taking tools actually hand you:
+  #   Plaud, Otter exports .............. .mp3 .wav .txt .srt
+  #   Apple Voice Memos, Google Recorder  .m4a
+  #   Audiobooks/long-form recorders .... .m4b .aiff
+  #   WhatsApp / Telegram voice notes ... .opus .oga .amr
+  #   Zoom / Teams / Meet recordings .... .mp4 .mov .webm (audio is extracted)
+  #   Zoom / Teams / Fireflies / YouTube  .vtt
+  #   Typed notes ....................... .txt .md
+  audio_extensions: [".mp3", ".wav", ".m4a", ".m4b", ".flac", ".ogg", ".oga",
+                     ".opus", ".aac", ".wma", ".amr", ".aiff", ".webm", ".mp4",
+                     ".mov"]
+  text_extensions: [".txt", ".srt", ".vtt", ".md"]
   # Content-hash dedupe. A file already in the DB is skipped, never reprocessed.
   dedupe: true
   # Move originals out of inbox after successful processing.
