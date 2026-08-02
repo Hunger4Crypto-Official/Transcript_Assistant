@@ -554,8 +554,12 @@ class Pipeline:
         else:
             out = self.cfg.path("outbox") / stem
             out.parent.mkdir(parents=True, exist_ok=True)
-            (out.parent / f"{rec.id}.transcript.md").write_text(transcript_md, encoding="utf-8")
-            (out.parent / f"{rec.id}.analysis.json").write_text(analysis_json, encoding="utf-8")
+            # Atomic, the way the vault writes are: a crash or a full disk in the
+            # middle of write_text leaves a half-written transcript that reads as
+            # a complete one. Write to a temp name and rename it into place, so
+            # the file at the final path is always whole or absent.
+            _atomic_write_text(out.parent / f"{rec.id}.transcript.md", transcript_md)
+            _atomic_write_text(out.parent / f"{rec.id}.analysis.json", analysis_json)
             rec.artifact_paths["transcript"] = str(out.parent / f"{rec.id}.transcript.md")
             rec.artifact_paths["analysis"] = str(out.parent / f"{rec.id}.analysis.json")
 
@@ -764,6 +768,13 @@ WORDS_PER_SECOND = 2.6
 # zero-width joiners and spaces, and the various invisible formatting marks
 # that survive a copy-paste out of a word processor.
 INVISIBLE = "﻿​‌‍⁠­￼�"
+
+
+def _atomic_write_text(path: Path, text: str) -> None:
+    """Write text so the file at `path` is always whole or absent, never partial."""
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(text, encoding="utf-8")
+    tmp.replace(path)
 
 
 def _has_speech(segments) -> bool:
