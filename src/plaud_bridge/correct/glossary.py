@@ -31,11 +31,20 @@ class CorrectionReport:
         return sum(self.applied.values())
 
     def summary(self) -> str:
+        """
+        Counts only -- deliberately no matched phrases.
+
+        A rule is only counted when it actually fired, so the source term of
+        every applied rule is a phrase that was really spoken in the recording.
+        This string is written to the plaintext log and to the audit trail in
+        the plaintext index, neither of which is meant to carry content. Redaction
+        logs its pattern NAMES ("phone=2"), never the matched text, and this
+        holds the same line. The per-rule breakdown is on `applied` for anyone
+        who wants it in memory.
+        """
         if not self.applied:
             return "no corrections applied"
-        top = sorted(self.applied.items(), key=lambda kv: -kv[1])[:5]
-        detail = ", ".join(f"{k}->{v}x" for k, v in top)
-        return f"{self.total} corrections across {self.segments_touched} segments ({detail})"
+        return f"{self.total} corrections across {self.segments_touched} segments"
 
 
 def _compile(corrections: dict[str, str]) -> list[tuple[re.Pattern[str], str, str]]:

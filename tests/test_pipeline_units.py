@@ -68,6 +68,23 @@ def test_glossary_leaves_clean_text_alone():
     assert out[0].text == "Nothing here needs correcting at all."
 
 
+def test_the_glossary_summary_carries_no_matched_phrase():
+    """
+    A rule is only counted when it fired, so its source term was really spoken.
+    The summary goes to the plaintext log and the plaintext audit index, which
+    are not meant to carry content -- redaction logs 'phone=2', never the number.
+    So the summary must be counts only, with the matched terms nowhere in it.
+    """
+    segs = [Segment(0, 4, "We discussed the elimination. Period and the I U L policy.")]
+    _, report = apply_corrections(segs, CFG.glossary)
+    assert report.total >= 1, "the fixture must actually correct something for this to mean anything"
+    summary = report.summary()
+    for term in ("elimination", "period", "iul", "i u l"):
+        assert term not in summary.lower(), f"the summary leaked the matched phrase {term!r}"
+    # It still reports that work happened, just without the words.
+    assert str(report.total) in summary
+
+
 # ---- redaction ----------------------------------------------------------
 def test_redaction_catches_common_pii():
     text = "SSN 123-45-6789, phone (702) 555-1234, email a.b@x.com, policy AB-1234567"
