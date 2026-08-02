@@ -1054,12 +1054,19 @@ def cmd_new_profile(args) -> int:
         return 1
 
     name = args.name or pid.replace("_", " ").title()
+    # These come from the command line and land inside quoted YAML scalars, so a
+    # value containing a quote, a colon, or a newline would break out and inject
+    # structure -- or, more likely for a value the user typed themselves, just
+    # write a file that no longer parses. json.dumps produces a correctly escaped
+    # double-quoted scalar that is also valid YAML, which keeps the templated
+    # values safe without discarding the template's comments the way re-dumping
+    # the whole thing would. `pid` is already validated as an identifier.
     body = (
         template.read_text(encoding="utf-8")
         .replace('id: "PROFILE_ID"', f'id: {pid}')
-        .replace('name: "Profile Name"', f'name: "{name}"')
-        .replace('short_name: "Short"', f'short_name: "{args.short_name or name}"')
-        .replace('heading: "Section Heading"', f'heading: "{args.heading or name}"')
+        .replace('name: "Profile Name"', f'name: {json.dumps(name)}')
+        .replace('short_name: "Short"', f'short_name: {json.dumps(args.short_name or name)}')
+        .replace('heading: "Section Heading"', f'heading: {json.dumps(args.heading or name)}')
     )
     dest.write_text(body, encoding="utf-8")
 
