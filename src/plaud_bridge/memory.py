@@ -836,6 +836,15 @@ class MemoryStore:
                     "memory: %s is flagged for human attention; not filing it under %s",
                     recording_id, profile_id,
                 )
+                # If a prior, unflagged pass already filed this recording, its
+                # contribution has to be REMOVED, not merely left to stop growing.
+                # A re-analysis that newly flags a recording otherwise keeps last
+                # month's sightings feeding into every future prompt -- the exact
+                # thing the flag forbids -- and leaves the incremental ledger
+                # disagreeing with what rebuild() would produce from scratch.
+                if self.ledger(profile_id).purge(recording_id):
+                    if profile_id not in touched:
+                        touched.append(profile_id)
                 continue
 
             ledger = self.ledger(profile_id)

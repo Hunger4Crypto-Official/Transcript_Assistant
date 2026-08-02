@@ -129,6 +129,28 @@ def test_a_reanalysed_recording_replaces_what_it_contributed(tmp_path, monkeypat
     assert all(e.mentions == 1 for e in ledger.entries)
 
 
+def test_a_reanalysis_that_flags_a_recording_removes_what_it_filed(tmp_path, monkeypatch):
+    """
+    The flag exists to keep concerning content out of future prompts. A recording
+    an earlier unflagged pass filed, then re-analysed and flagged, must have its
+    old contribution REMOVED -- not left feeding carry_forward -- so the
+    incremental ledger matches what rebuild() would produce from scratch (which
+    never files a flagged analysis at all).
+    """
+    cfg, store = _store(tmp_path, monkeypatch)
+    store.update_from_record(_record("rec_one", "father", FATHER_FIELDS))
+    assert store.ledger("father").entries, "the first pass should have filed something"
+
+    touched = store.update_from_record(
+        _record("rec_one", "father", FATHER_FIELDS, attention=True)
+    )
+    assert "father" in touched, "flagging a previously-filed recording must change the ledger"
+
+    ledger = store.ledger("father")
+    assert ledger.entries == [], "the flagged re-analysis left the old contribution behind"
+    assert "rec_one" not in ledger.seen, "the stale seen-signature survived the flag"
+
+
 # =========================================================================
 # Provenance
 # =========================================================================
