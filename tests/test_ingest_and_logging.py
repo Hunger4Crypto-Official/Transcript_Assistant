@@ -205,3 +205,58 @@ def test_a_null_duration_is_an_actionable_error(monkeypatch, tmp_path):
     with pytest.raises(AudioError) as excinfo:
         probe_duration(tmp_path / "clip.m4a")
     assert "duration" in str(excinfo.value)
+
+
+@pytest.mark.parametrize("value", ["nan", "inf", "-inf", "-30", "0"])
+def test_a_nonsense_duration_is_refused(monkeypatch, tmp_path, value):
+    """
+    float() will happily return NaN, infinity, or a negative from a crafted or
+    corrupt container, and any of those turns the chunk arithmetic into a
+    non-terminating loop or a nonsense chunk count. It is rejected at the probe.
+    """
+    class _Proc:
+        returncode = 0
+        stdout = '{"format": {"duration": "%s"}}' % value
+        stderr = ""
+
+    monkeypatch.setattr("plaud_bridge.audio.prepare._run", lambda *a, **k: _Proc())
+    with pytest.raises(AudioError):
+        probe_duration(tmp_path / "clip.m4a")
+
+
+def test_a_recording_over_the_duration_budget_is_refused_before_decoding(monkeypatch, tmp_path):
+    """
+    normalise decodes the whole input to uncompressed PCM before anything else
+    looks at it, so an over-budget file must be refused before ffmpeg runs, not
+    after gigabytes of scratch are on disk. When the source duration is readable
+    and over budget, no decode command is issued at all.
+    """
+    from _fixtures import build_sandbox
+    from plaud_bridge.audio.prepare import AudioPreparer
+
+    cfg, _ = build_sandbox(tmp_path, monkeypatch,
+                           overrides={"audio": {"max_duration_seconds": 3600}})
+    prep = AudioPreparer(cfg)
+    monkeypatch.setattr(AudioPreparer, "check_tools", lambda self: None)
+
+    calls: list[list[str]] = []
+
+    def fake_run(cmd, *a, **k):
+        calls.append(cmd)
+        class _Proc:
+            returncode = 0
+            # Anything that runs is an ffprobe; report a 3-hour file, over the
+            # 1-hour budget. If a decode (ffmpeg) is ever issued, the -c:a arg
+            # gives it away and the assertion below catches it.
+            stdout = '{"format": {"duration": "10800"}}'
+            stderr = ""
+        return _Proc()
+
+    monkeypatch.setattr("plaud_bridge.audio.prepare._run", fake_run)
+
+    with pytest.raises(AudioError, match="budget"):
+        prep.normalise(tmp_path / "marathon.m4a", tmp_path / "work")
+
+    assert not any("pcm_s16le" in c for c in calls), (
+        "an over-budget file was decoded instead of refused before the decode"
+    )

@@ -41,6 +41,13 @@ ingest:
                      ".opus", ".aac", ".wma", ".amr", ".aiff", ".webm", ".mp4",
                      ".mov"]
   text_extensions: [".txt", ".srt", ".vtt", ".md"]
+  # A ceiling on an imported text transcript, read whole into memory before it
+  # is parsed. A real transcript is well under a megabyte -- a day of speech is
+  # a few hundred kilobytes -- so 10 MB is generous and still stops a stray
+  # multi-gigabyte file (a log, a database dump, a wrong drag-and-drop) from
+  # exhausting memory. Audio has its own duration budget below; this is the
+  # text side of the same guard. Raise it if you genuinely import huge exports.
+  max_text_bytes: 10_000_000
   # Content-hash dedupe. A file already in the DB is skipped, never reprocessed.
   dedupe: true
   # Move originals out of inbox after successful processing.
@@ -78,6 +85,13 @@ audio:
   chunk_seconds: 600
   chunk_overlap_seconds: 8
   max_chunk_mb: 20
+  # The longest single recording accepted. Normalising decodes the whole input
+  # to uncompressed 16k mono PCM (~115 MB/hour of scratch) before chunking, so
+  # this bounds both the scratch file and the chunk fan-out. 14 hours clears a
+  # day-long wearable session; a file longer than this is refused before it is
+  # decoded when its container reports a duration, and capped at the budget when
+  # it does not.
+  max_duration_seconds: 50400
 
 asr:
   # Provider order is a fallback chain, not a preference list.

@@ -253,6 +253,23 @@ class Pipeline:
 
     def _load_text(self, rec: Recording, path: Path) -> None:
         """Accept an exported transcript directly, skipping ASR entirely."""
+        # A text transcript is read whole into memory before it is parsed, so a
+        # size ceiling has to come first. Without it a stray multi-gigabyte file
+        # -- a log, a DB dump, the wrong thing dragged into the inbox -- is read
+        # in its entirety and then split into a list proportional to its size,
+        # which is a plain out-of-memory. Refuse before reading rather than after.
+        max_bytes = int(self.cfg.get("ingest.max_text_bytes", 10_000_000))
+        try:
+            size = path.stat().st_size
+        except OSError as exc:
+            raise PipelineError(f"cannot read {path.name}: {exc}") from exc
+        if size > max_bytes:
+            raise PipelineError(
+                f"{path.name} is {size / 1_000_000:.1f} MB of text, over the "
+                f"ingest.max_text_bytes ceiling of {max_bytes / 1_000_000:.1f} MB. "
+                "A transcript this large is almost certainly not a transcript. "
+                "Raise the limit in config if it genuinely is one."
+            )
         # utf-8-sig strips the byte order mark other tools leave at the front.
         # Without it the first speaker's name carries an invisible character,
         # which is enough to stop the speaker-label heuristics recognising it —

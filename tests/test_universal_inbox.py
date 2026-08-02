@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import pytest
 
-from _fixtures import CLIENT_CALL, drop
+from _fixtures import CLIENT_CALL, build_sandbox, drop
 from plaud_bridge.pipeline import Pipeline, _parse_text_transcript
 
 
@@ -214,3 +214,27 @@ def test_video_containers_are_classified_as_audio_not_text(sandbox):
     assert {".mp4", ".mov", ".webm"} <= audio
     assert ".vtt" in text
     assert not audio & text, "an extension in both sets would be classified twice"
+
+
+def test_an_oversized_text_file_is_refused_before_it_is_read(tmp_path, monkeypatch):
+    """
+    An imported transcript is read whole into memory. A stray multi-gigabyte
+    file dragged into the inbox would be an out-of-memory, so the size is checked
+    before the read. The whole run must survive it: the bad file fails, and any
+    good file beside it still processes.
+    """
+    cfg, _ = build_sandbox(tmp_path, monkeypatch, overrides={"ingest": {"max_text_bytes": 2000}})
+    drop(cfg, "huge-notes.txt", "word " * 1000)      # 5000 bytes, over the 2000 cap
+    drop(cfg, "real-call.txt", CLIENT_CALL)
+
+    pipe = Pipeline(cfg)
+    try:
+        stats = pipe.run()
+        assert stats.failed == 1, "the oversized file should have failed, not crashed the run"
+        assert stats.processed == 1, "the good file beside it should still have processed"
+        rows = {r["source_name"]: r for r in pipe.db.query(stage=None)}
+        assert rows["huge-notes.txt"]["stage"] == "failed"
+        reasons = [r["detail"] for r in pipe.db.audit_log(rows["huge-notes.txt"]["id"])]
+        assert any("max_text_bytes" in str(d) for d in reasons)
+    finally:
+        pipe.close()
