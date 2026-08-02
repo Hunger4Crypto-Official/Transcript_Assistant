@@ -45,6 +45,7 @@ from .llm import complete_json
 from .llm.base import LLMError
 from .logging_setup import get
 from .models import format_stamp
+from .profiles.extractor import _flatten, quote_is_present
 from .runtime import is_offline
 from .storage import Vault, VaultError
 
@@ -782,13 +783,27 @@ def _user_prompt(question: str, bundle: str, left_out: int, withheld: int,
 
 def _validate_citations(raw: Any, used: list[Excerpt]) -> tuple[list[Citation], list[str], int]:
     """
-    Keep only citations that point at material actually sent to the model.
+    Keep only citations whose words were actually in the material sent.
 
-    A citation naming a recording that was never in the bundle is dropped
-    outright and logged. A citation naming a real recording with a timestamp
-    that was not sent has its stamp snapped to the excerpt whose words best
-    match the quote, which is still real retrieved data rather than a number the
-    model chose. Both counts surface in the answer.
+    Three checks, in order, because each is a different way a citation can be a
+    fabrication:
+
+    1. The recording must have been in the bundle. A citation naming a recording
+       that was never sent is dropped and logged.
+    2. The QUOTE must appear verbatim (up to case and punctuation) in one of that
+       recording's excerpts. This is the check that was missing, and its absence
+       was the whole point of the feature turning back into the thing it exists
+       to prevent: the model could attach an invented sentence to a real
+       recording id and a real timestamp, and it rendered as a sourced quote and
+       was saved to the vault. A quote nobody said is dropped exactly like a
+       recording nobody sent -- it is the same lie with better paperwork.
+    3. A quote that IS present but carries a timestamp that was not sent has its
+       stamp snapped to the excerpt it was actually found in. That is real
+       retrieved data rather than a number the model chose. Snapping only ever
+       happens to a quote that already passed check 2.
+
+    `extractor._verify_quotes` makes the same call for extracted quotes, and the
+    two share `quote_is_present` so they cannot drift.
     """
     by_id: dict[str, list[Excerpt]] = {}
     for excerpt in used:
@@ -814,20 +829,32 @@ def _validate_citations(raw: Any, used: list[Excerpt]) -> tuple[list[Citation], 
             )
             continue
 
-        if stamp not in {e.stamp for e in excerpts}:
-            best = max(excerpts, key=lambda e: _overlap(quote, e.text))
+        # The quote has to be findable in THIS recording's excerpts. The one
+        # whose words it matches becomes its source; if none match, the model
+        # invented it.
+        match = next(
+            (e for e in excerpts if quote_is_present(quote, _flatten(e.text))), None
+        )
+        if match is None:
+            dropped.append(f"{rec_id} (quote not in the excerpts)")
+            log.warning(
+                "ask: dropped a citation for %s whose quote was in none of the "
+                "excerpts sent for it: %.60s", rec_id, quote,
+            )
+            continue
+
+        if stamp != match.stamp:
             if stamp:
                 repaired += 1
                 log.info(
-                    "ask: citation for %s used timestamp '%s', which was not sent; "
-                    "snapped to '%s'", rec_id, stamp, best.stamp,
+                    "ask: citation for %s used timestamp '%s', which was not where "
+                    "the quote was found; snapped to '%s'", rec_id, stamp, match.stamp,
                 )
-            stamp = best.stamp
+            stamp = match.stamp
 
-        source = next((e for e in excerpts if e.stamp == stamp), excerpts[0])
         kept.append(Citation(
             recording_id=rec_id, stamp=stamp, quote=quote,
-            source_name=source.source_name, when=source.when,
+            source_name=match.source_name, when=match.when,
         ))
     return kept, dropped, repaired
 

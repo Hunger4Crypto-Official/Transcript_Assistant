@@ -110,13 +110,37 @@ _WORD = re.compile(r"[^a-z0-9]+")
 
 def _flatten(text: str) -> str:
     """
-    Lowercase, punctuation-free, single-spaced.
+    Lowercase, punctuation-free, single-spaced, and boundary-padded.
 
     Comparison happens on this form so that a model returning smart quotes,
     different capitalisation, or an extra line break is not accused of making
     the quote up. What it does not forgive is different words.
+
+    The leading and trailing spaces are load-bearing: they let `quote_is_present`
+    require whole-word matches. Strip them off a needle and "pay" matches inside
+    "payment" -- which is how a fabricated fragment slipped through the first
+    version of the quote check.
     """
     return f" {_WORD.sub(' ', text.lower()).strip()} "
+
+
+def quote_is_present(quote: str, haystack_flat: str) -> bool:
+    """
+    Whether a quote appears verbatim (up to case and punctuation) in the text.
+
+    `haystack_flat` must already be `_flatten`ed. The needle is flattened here
+    but NOT stripped, so its boundary spaces stay attached and the match is on
+    whole words rather than substrings. A quote of only punctuation flattens to
+    a bare " " and is treated as absent rather than matching everywhere.
+
+    This is the one check `ask` and the extractor must agree on -- both decide
+    whether the model invented a quote -- so they share it rather than keeping
+    two subtly different copies.
+    """
+    needle = _flatten(quote)
+    if not needle.strip():
+        return False
+    return needle in haystack_flat
 
 
 def _quote_texts(value: Any) -> list[str]:
@@ -170,7 +194,7 @@ def _verify_quotes(fields: dict[str, Any], profile: Profile,
         for item in items:
             # An item carrying no quoted text has nothing to check; it is the
             # ones claiming somebody said something that have to earn it.
-            missing = [t for t in _quote_texts(item) if _flatten(t).strip() not in haystack]
+            missing = [t for t in _quote_texts(item) if not quote_is_present(t, haystack)]
             if missing:
                 dropped.extend(missing)
             else:

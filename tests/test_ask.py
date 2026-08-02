@@ -409,6 +409,55 @@ def test_every_surviving_citation_names_a_recording_that_was_actually_sent(
     assert all(c.recording_id in sent for c in answer.citations)
 
 
+def test_a_fabricated_quote_on_a_real_recording_is_dropped(bridge, monkeypatch):
+    """
+    The failure a red-team pass found: citation validation checked the recording
+    id and snapped a bad timestamp, but never checked the quote TEXT. So the
+    model could attach an invented sentence to a real recording and a real
+    timestamp and it rendered as a sourced quote and was saved to the vault --
+    the exact thing this feature exists to prevent, wearing better paperwork.
+    """
+    real = bridge.index("henderson-review.txt", HENDERSON_LINES, ["insurance_agent"])
+    _install(monkeypatch, FakeLLM(lambda user: {
+        "answer": "You authorised a large payout.",
+        "citations": [
+            {"recording_id": _first_header(user)[0], "stamp": _first_header(user)[1],
+             "quote": "I authorize the full two million dollar payout immediately."},
+        ],
+        "confidence": "high", "unanswered": "",
+    }))
+
+    answer = bridge.ask("what did I promise the Hendersons about the conversion rider?")
+    # The recording was real, but nobody said that. It is dropped exactly like a
+    # citation naming a recording that was never sent.
+    assert answer.citations == []
+    assert any("quote not in the excerpts" in d for d in answer.dropped_citations)
+    # And it never reaches what a person reads or what gets saved.
+    assert "two million" not in answer.render()
+    _ = real
+
+
+def test_a_real_quote_with_a_wrong_stamp_is_kept_and_snapped(bridge, monkeypatch):
+    """
+    Snapping still works -- but only for a quote that passed the text check
+    first. A wrong timestamp on words that were genuinely said is repaired to
+    the excerpt those words were found in, not dropped.
+    """
+    real_line = HENDERSON_LINES[4][1]   # "I will email the conversion language on Monday..."
+    bridge.index("henderson-review.txt", HENDERSON_LINES, ["insurance_agent"])
+    _install(monkeypatch, FakeLLM(lambda user: {
+        "answer": "Noted.",
+        "citations": [{"recording_id": _first_header(user)[0], "stamp": "88:88:88",
+                       "quote": real_line}],
+        "confidence": "high", "unanswered": "",
+    }))
+
+    answer = bridge.ask("what did I promise the Hendersons about the conversion language?")
+    assert len(answer.citations) == 1
+    assert answer.repaired_citations == 1
+    assert answer.citations[0].stamp != "88:88:88"
+
+
 def test_a_timestamp_that_was_never_sent_is_repaired_from_real_data(bridge, monkeypatch):
     """
     A wrong stamp on a real recording is repaired to a stamp that was in the

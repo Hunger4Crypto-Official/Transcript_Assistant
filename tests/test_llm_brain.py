@@ -167,7 +167,7 @@ def _quote_field(cfg, profile_id="insurance_agent"):
 def test_a_quote_that_was_really_said_survives(sandbox, monkeypatch):
     cfg, _ = sandbox
     key = _quote_field(cfg)
-    real = CLIENT_CALL.splitlines()[2].split(":", 1)[-1].strip()[:40]
+    real = " ".join(CLIENT_CALL.splitlines()[2].split(":", 1)[-1].strip().split()[:6])
 
     analysis = quoted(cfg, monkeypatch, {
         key: [{"timestamp": "00:10", "speaker": "Client", "text": real}],
@@ -192,7 +192,7 @@ def test_the_real_quote_survives_alongside_the_invented_one(sandbox, monkeypatch
     """Verification is per quote, not per field — one bad one is not contagious."""
     cfg, _ = sandbox
     key = _quote_field(cfg)
-    real = CLIENT_CALL.splitlines()[2].split(":", 1)[-1].strip()[:40]
+    real = " ".join(CLIENT_CALL.splitlines()[2].split(":", 1)[-1].strip().split()[:6])
 
     analysis = quoted(cfg, monkeypatch, {
         key: [
@@ -207,7 +207,7 @@ def test_the_real_quote_survives_alongside_the_invented_one(sandbox, monkeypatch
 def test_punctuation_and_case_are_forgiven_but_different_words_are_not(sandbox, monkeypatch):
     cfg, _ = sandbox
     key = _quote_field(cfg)
-    real = CLIENT_CALL.splitlines()[2].split(":", 1)[-1].strip()[:40]
+    real = " ".join(CLIENT_CALL.splitlines()[2].split(":", 1)[-1].strip().split()[:6])
 
     loud = quoted(cfg, monkeypatch, {
         key: [{"timestamp": "00:10", "speaker": "Client", "text": f"  {real.upper()}!!  "}],
@@ -219,6 +219,29 @@ def test_punctuation_and_case_are_forgiven_but_different_words_are_not(sandbox, 
                "text": "the client indicated interest in coverage options"}],
     })
     assert reworded.fields[key] == [], "a paraphrase is not a quote"
+
+
+def test_a_fragment_inside_a_real_word_is_not_a_quote(sandbox, monkeypatch):
+    """
+    The boundary bug a red-team pass found: the check stripped the needle's
+    boundary spaces, so a fabricated fragment matched as a substring INSIDE a
+    real word -- "pay" inside "payment", "own" inside "downtown". This is the
+    test that distinguishes whole-word matching from substring matching; a
+    whole-phrase fixture passes under both and would not have caught it.
+    """
+    cfg, _ = sandbox
+    key = _quote_field(cfg)
+    # "elimination" and "occupation" are both genuinely in CLIENT_CALL.
+    body = "the elimination period and the own occupation definition matter here"
+
+    result = quoted(cfg, monkeypatch, {
+        key: [{"timestamp": "00:10", "speaker": "X", "text": "lim"},      # inside "elimination"
+              {"timestamp": "00:11", "speaker": "X", "text": "cup"},      # inside "occupation"
+              {"timestamp": "00:12", "speaker": "X", "text": "own occupation"}],  # real whole words
+    }, body=body)
+    kept = [q["text"] for q in result.fields[key]]
+    assert kept == ["own occupation"], f"a fragment slipped through: {kept}"
+    assert result.unverified_quotes == 2
 
 
 def test_it_checks_against_what_the_model_was_shown_not_the_raw_transcript(sandbox, monkeypatch):
