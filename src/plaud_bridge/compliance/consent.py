@@ -93,8 +93,20 @@ class ConsentResult:
 
 
 def _is_owner(speaker: str, owner_label: str) -> bool:
+    """
+    Whether a speaker label is the owner's, by exact match.
+
+    Exact, not substring. Speaker labels are not trustworthy identity: an
+    imported VTT or SRT names its own speakers, and even diarization's labels
+    are only as good as the clustering. The old test was `owner_label in
+    speaker`, which let "Not Sasson", "Sasson's assistant", or a spoofed
+    "Sassonx" pass as the owner -- and the one thing this decides is whose "I'm
+    recording this" counts as YOU announcing it. Diarization labels the owner's
+    own segments with exactly `owner_label`, so nothing legitimate is lost by
+    refusing the lookalikes.
+    """
     a, b = speaker.strip().lower(), owner_label.strip().lower()
-    return bool(a) and bool(b) and (a == b or b in a)
+    return bool(a) and bool(b) and a == b
 
 
 def detect_consent(transcript: Transcript, window_seconds: float = 90.0,

@@ -337,6 +337,24 @@ class Recording:
                 entry["fields_withheld"] = True
             analyses.append(entry)
 
+        # Withholding the transcript segments is not enough. Three other fields
+        # are lifted verbatim from the transcript and would otherwise ride into
+        # the plain-file index in the clear for an encrypted recording: the
+        # consent quote, and the router's short "evidence" phrases both on the
+        # top-level routes and inside each episode's routes. A red-team pass
+        # read a client's own words straight out of bridge.db this way. When the
+        # transcript is withheld, these are withheld with it.
+        compliance = self.compliance.to_dict()
+        routes = [r.to_dict() for r in self.routes]
+        episodes = [e.to_dict() for e in self.episodes]
+        if not include_transcript:
+            compliance.pop("consent_quote", None)
+            for route in routes:
+                route.pop("evidence", None)
+            for episode in episodes:
+                for route in episode.get("routes", []):
+                    route.pop("evidence", None)
+
         return {
             "id": self.id,
             "source_path": self.source_path,
@@ -349,9 +367,9 @@ class Recording:
             "stage": self.stage.value,
             "duration_seconds": self.duration_seconds,
             "transcript": transcript,
-            "routes": [r.to_dict() for r in self.routes],
-            "episodes": [e.to_dict() for e in self.episodes],
-            "compliance": self.compliance.to_dict(),
+            "routes": routes,
+            "episodes": episodes,
+            "compliance": compliance,
             "analyses": analyses,
             "total_cost_usd": self.total_cost_usd,
             "errors": self.errors,

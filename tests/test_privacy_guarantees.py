@@ -185,6 +185,36 @@ def test_an_unencrypted_profile_keeps_its_transcript_in_the_index(tmp_path, monk
     assert "hello there" not in rec.to_json(include_transcript=False)
 
 
+def test_the_withheld_index_leaks_no_transcript_derived_string():
+    """
+    A red-team pass read a client's own words out of the plain SQLite index of
+    an ENCRYPTED recording. Withholding the transcript segments was not enough:
+    the consent quote and the router's evidence phrases are lifted verbatim from
+    the transcript and were riding into payload_json in the clear. The old test
+    greps one phrase that happens to appear in neither, so it missed this.
+    """
+    from plaud_bridge.models import (ComplianceVerdict, Recording, RouteMatch,
+                                     Segment, Transcript)
+
+    rec = Recording(source_name="client.txt", kind="text")
+    rec.transcript = Transcript(segments=[
+        Segment(0.0, 5.0, "my elimination period worries me", "Client"),
+        Segment(5.0, 9.0, "the biopsy results came back positive", "Client"),
+    ])
+    rec.compliance = ComplianceVerdict()
+    rec.compliance.consent_quote = "Sure. my elimination period worries me."
+    rec.routes = [RouteMatch(profile_id="insurance_agent", confidence=0.9,
+                             evidence=["biopsy results", "elimination period"])]
+
+    withheld = rec.to_json(include_transcript=False, include_analysis_fields=False)
+    for phrase in ("elimination period", "biopsy results", "worries me"):
+        assert phrase not in withheld, f"withheld index still leaks {phrase!r}"
+
+    # And the clear path is unchanged -- withholding is a response to encryption.
+    clear = rec.to_json(include_transcript=True, include_analysis_fields=True)
+    assert "biopsy results" in clear and "elimination period" in clear
+
+
 # =========================================================================
 # Consent
 # =========================================================================
@@ -232,3 +262,38 @@ def test_consent_detection_cases(body, expected):
 
     result = detect_consent(Transcript(segments=segments), 90.0, owner_label="Sasson")
     assert result.complete is expected, result.notes
+
+
+def test_owner_identity_is_an_exact_match_not_a_substring():
+    """
+    Whose announcement counts as YOURS is decided by the speaker label, and a
+    substring test (`owner_label in speaker`) accepted "Not Sasson" and "Sasson's
+    assistant" as the owner. Speaker labels come from diarization or, worse, from
+    an untrusted imported transcript, so a lookalike must not pass.
+    """
+    from plaud_bridge.compliance.consent import _is_owner
+
+    assert _is_owner("Sasson", "Sasson")
+    assert _is_owner(" sasson ", "Sasson"), "case and surrounding space must still match"
+    for impostor in ("Not Sasson", "Sasson's assistant", "Sassonx", "The Sasson"):
+        assert not _is_owner(impostor, "Sasson"), f"{impostor!r} was accepted as the owner"
+
+
+def test_a_lookalike_cannot_announce_the_recording_for_the_owner():
+    """
+    End to end: the real owner is in the room, but the 'I record these' line is
+    spoken by a differently-labelled speaker whose label merely contains the
+    owner's name. That is not the owner announcing, so consent is not announced.
+    """
+    from plaud_bridge.compliance.consent import detect_consent
+
+    segments = [
+        Segment(0.0, 4.0, "Morning, thanks for coming in.", "Sasson"),
+        Segment(4.0, 8.0, "Just so you know, I record these for my notes, okay?",
+                "Sasson's assistant"),
+        Segment(8.0, 12.0, "Yeah, that's fine.", "Marcus"),
+    ]
+    result = detect_consent(Transcript(segments=segments), 90.0, owner_label="Sasson")
+    assert not result.announced, (
+        "an announcement by a lookalike label was accepted as the owner's"
+    )
