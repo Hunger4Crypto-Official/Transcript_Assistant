@@ -115,6 +115,20 @@ def test_truncation_on_an_exact_chunk_boundary_is_detected(vault, tmp_path):
     assert not (tmp_path / "out.mp3").exists()
 
 
+def test_data_appended_after_the_final_chunk_is_detected(vault, tmp_path):
+    """
+    Every real chunk decrypts, and the final one is authenticated as final -- but
+    that does not say it is the last byte in the file. Bytes spliced on after it
+    would otherwise be ignored, so a modified file reads as intact.
+    """
+    source = _source(tmp_path, 200_000)
+    stored = vault.write_stream("x/rec_ap.source.mp3", source, "rec_ap", chunk_size=16384)
+    stored.write_bytes(stored.read_bytes() + b"\x00" * 64)
+
+    with pytest.raises(VaultError, match="after its final chunk"):
+        vault.read_stream(stored, tmp_path / "out.mp3", "rec_ap")
+
+
 def test_a_modified_chunk_is_detected(vault, tmp_path):
     source = _source(tmp_path, 200_000)
     stored = vault.write_stream("x/rec_c.source.mp3", source, "rec_c", chunk_size=16384)

@@ -36,6 +36,41 @@ def test_wrong_recording_id_fails_to_decrypt(vault):
         vault.read_text(path, "rec_2")
 
 
+def test_two_artifacts_of_one_recording_cannot_be_swapped(vault):
+    """
+    Both files carry the same recording id, so binding to the id alone let their
+    ciphertexts be swapped on disk and still decrypt -- a transcript would open
+    where the analysis belongs. The filename is folded into the binding too, so
+    neither opens in the other's place.
+    """
+    t = vault.write("day/rec_1.transcript.md", "the words that were said", "rec_1")
+    a = vault.write("day/rec_1.analysis.json", '{"ok": true}', "rec_1")
+
+    tb, ab = t.read_bytes(), a.read_bytes()
+    t.write_bytes(ab)
+    a.write_bytes(tb)
+
+    with pytest.raises(VaultError, match="decryption failed"):
+        vault.read_text(t, "rec_1")
+    with pytest.raises(VaultError, match="decryption failed"):
+        vault.read_text(a, "rec_1")
+
+
+def test_a_saved_answer_is_bound_to_its_own_filename(vault):
+    """
+    Saved answers carry no recording id, so before the filename was folded in
+    they were all bound to the same empty string and one could be swapped for
+    another. Now each is bound to its own name.
+    """
+    one = vault.write("ask/answer-one", "first answer", "")
+    two = vault.write("ask/answer-two", "second answer", "")
+
+    # Plant answer-two's ciphertext where answer-one lives.
+    one.write_bytes(two.read_bytes())
+    with pytest.raises(VaultError, match="decryption failed"):
+        vault.read_text(one, "")
+
+
 def test_tampering_is_detected(vault):
     path = vault.write("x.md", "private", "rec_1")
     raw = bytearray(path.read_bytes())

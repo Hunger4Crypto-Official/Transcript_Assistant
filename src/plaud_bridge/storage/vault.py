@@ -117,12 +117,30 @@ class Vault:
                 "decryption failed. Either the passphrase is wrong or the file has been modified."
             ) from exc
 
+    @staticmethod
+    def _artifact_aad(recording_id: str, name: str) -> bytes:
+        """
+        Bind a ciphertext to both its recording and its filename.
+
+        The recording id alone stops a file being swapped between recordings --
+        a Husband transcript planted as an Insurance one -- but it does not stop
+        two artifacts of the SAME recording being swapped, because they share it.
+        A transcript moved on top of the analysis both carry the same id and both
+        decrypt. Folding the basename in closes that: the transcript is bound to
+        `...transcript.md.enc` and the analysis to `...analysis.json.enc`, so
+        neither opens in the other's place. It also binds a saved answer, which
+        carries no recording id at all, to its own filename rather than to the
+        empty string. The name is the last path component only, so it does not
+        depend on where the vault root happens to sit.
+        """
+        return f"{recording_id}\x00{name}".encode("utf-8")
+
     def write(self, relative: str, data: str | bytes, recording_id: str = "") -> Path:
         payload = data.encode("utf-8") if isinstance(data, str) else data
-        # Bind ciphertext to its recording id so files cannot be silently
-        # swapped between recordings.
-        aad = recording_id.encode("utf-8")
         dest = self.root / f"{relative}.enc"
+        # Bind ciphertext to its recording id AND its filename, so files cannot
+        # be swapped between recordings or between artifacts of one recording.
+        aad = self._artifact_aad(recording_id, dest.name)
         dest.parent.mkdir(parents=True, exist_ok=True)
         tmp = dest.with_name(dest.name + ".tmp")
         tmp.write_bytes(self.encrypt_bytes(payload, aad))
@@ -246,6 +264,15 @@ class Vault:
                         "passphrase is wrong or the file has been modified."
                     )
                 if saw_final:
+                    # The final chunk is authenticated as final, but nothing yet
+                    # says it is the LAST byte in the file. Bytes appended after
+                    # it -- a spliced-on extra chunk, padding -- would otherwise
+                    # be silently ignored, so a modified file reads as intact.
+                    if fin.read(1):
+                        raise VaultError(
+                            "vault file has data after its final chunk; it has "
+                            "been modified."
+                        )
                     break
                 index += 1
 
@@ -291,7 +318,10 @@ class Vault:
             return False
 
     def read(self, path: Path, recording_id: str = "") -> bytes:
-        return self.decrypt_bytes(Path(path).read_bytes(), recording_id.encode("utf-8"))
+        path = Path(path)
+        return self.decrypt_bytes(
+            path.read_bytes(), self._artifact_aad(recording_id, path.name)
+        )
 
     def read_text(self, path: Path, recording_id: str = "") -> str:
         return self.read(path, recording_id).decode("utf-8")

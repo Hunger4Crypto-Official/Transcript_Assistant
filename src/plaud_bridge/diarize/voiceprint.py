@@ -211,7 +211,11 @@ class VoiceprintStore:
         if not self.path.exists():
             return self
         try:
-            raw = self._vault.decrypt_bytes(self.path.read_bytes(), STORE_AAD.encode())
+            # Read through the vault rather than decrypting by hand, so the AAD
+            # matches what save() wrote -- the vault binds a file to its basename
+            # as well as to this label, and reconstructing that here by hand is
+            # how the two drift apart.
+            raw = self._vault.read(self.path, STORE_AAD)
             payload = json.loads(raw.decode("utf-8"))
         except VaultError:
             raise
