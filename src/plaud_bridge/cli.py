@@ -623,20 +623,21 @@ def cmd_forget(args) -> int:
         if not args.yes and not _confirm("\nType FORGET to confirm: ", "FORGET"):
             return 1
 
+        # Archive.forget is the single destructive path: it removes the files,
+        # the index row, and every derived store that carried the recording's
+        # words -- the memory ledgers, saved answers, and follow-up state. It
+        # refuses the whole operation when the vault is locked, rather than
+        # deleting the plaintext half and stranding the rest.
         removed, failures = Archive(cfg, db).forget(args.recording_id)
-        print(f"\ndeleted {removed} file(s) and the index entry")
+        if db.load(args.recording_id) is not None:
+            # The index row is still there, so nothing was deleted: the vault
+            # was locked and the operation was refused whole.
+            print("\nnothing was deleted")
+        else:
+            print(f"\ndeleted {removed} file(s) and the index entry")
         for failure in failures:
-            print(f"  could not delete {failure}")
-
-        # A ledger that still remembers a deleted recording, and feeds it into
-        # the next prompt, would make this command's promise false.
-        store = MemoryStore(cfg)
-        forgotten = store.forget_recording(args.recording_id)
-        if forgotten:
-            print(f"removed it from {len(forgotten)} memory ledger(s): {', '.join(forgotten)}")
-        for problem in store.problems:
-            print(f"  {problem}")
-        return 1 if failures or store.problems else 0
+            print(f"  {failure}")
+        return 1 if failures else 0
     finally:
         db.close()
 

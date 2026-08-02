@@ -283,6 +283,115 @@ def test_forget_on_an_unknown_id_is_an_error(tmp_path, monkeypatch, capsys):
     assert "no recording" in capsys.readouterr().out
 
 
+def test_forget_purges_the_derived_stores_not_only_the_pipeline_artifacts(
+    tmp_path, monkeypatch
+):
+    """
+    A red-team pass deleted a recording and found its words still on disk. The
+    pipeline's own artifacts were gone, but four derived stores that quote or
+    name a recording were not touched: a saved answer that cited it, a follow-up
+    status that named it, a draft that traced to it, and the memory ledger it
+    fed into the next prompt. `forget` promises a recording leaves no trace;
+    every one of these made that false.
+    """
+    import json
+
+    from plaud_bridge.followups import (FollowUp, _load_state, set_status,
+                                        stable_id)
+    from plaud_bridge.memory import MemoryStore
+    from plaud_bridge.storage import Vault
+
+    cfg = _processed(tmp_path, monkeypatch)  # CLIENT_CALL -> insurance_agent, fills memory
+    vault = Vault(cfg.path("vault"))
+    db = Database(cfg.path("database"))
+    try:
+        rec_id = db.query()[0]["id"]
+
+        # (1) a saved answer that quotes this recording, written the way ask does
+        answer_path = vault.write("ask/an-answer", json.dumps({
+            "question": "what did I promise Marcus?",
+            "answer": "Two quotes by Thursday.",
+            "recordings_used": [rec_id],
+            "citations": [{"recording_id": rec_id, "stamp": "00:45",
+                           "quote": "I'll have them to you by Thursday."}],
+        }))
+        assert answer_path.exists()
+
+        # (2) a follow-up status that names this recording
+        fu = FollowUp(id=stable_id("send two quote options", "insurance_agent"),
+                      text="send two quote options", profile_id="insurance_agent",
+                      recording_id=rec_id, first_seen="2026-01-01")
+        set_status(cfg, vault, fu.id, "done", items=[fu])
+        assert fu.id in _load_state(cfg, vault)
+
+        # (3) a draft that traces to this recording in its footer
+        drafts = cfg.path("outbox") / "drafts"
+        drafts.mkdir(parents=True, exist_ok=True)
+        draft_path = drafts / "DRAFT-2026-01-01-follow-up.draft.md"
+        draft_path.write_text(f"# DRAFT\n\n<sub>Built from 1 follow-up, traced to: "
+                              f"{rec_id}.</sub>\n", encoding="utf-8")
+
+        # (4) the pipeline already folded this recording into the memory ledger
+        before = json.dumps(MemoryStore(cfg, vault).ledger("insurance_agent").to_dict())
+        assert rec_id in before, "the recording never reached the memory ledger to begin with"
+    finally:
+        db.close()
+
+    assert cmd_forget(_args(cfg, "forget", rec_id, "--yes")) == 0
+
+    assert not answer_path.exists(), "a saved answer citing the recording survived forget"
+    assert not draft_path.exists(), "a draft tracing to the recording survived forget"
+
+    db = Database(cfg.path("database"))
+    try:
+        state = _load_state(cfg, vault)
+        assert all(e.get("recording_id") != rec_id for e in state.values()), (
+            "a follow-up status kept the id of the forgotten recording"
+        )
+        after = json.dumps(MemoryStore(cfg, vault).ledger("insurance_agent").to_dict())
+        assert rec_id not in after, "the memory ledger still remembers the forgotten recording"
+    finally:
+        db.close()
+
+
+def test_forget_refuses_to_half_delete_when_the_vault_is_locked(
+    tmp_path, monkeypatch, capsys
+):
+    """
+    The dangerous case the fail-safe exists for. `forget` cannot open the
+    encrypted derived stores without the passphrase, so deleting the plaintext
+    half -- the files and the index row -- would strand the recording's words in
+    a memory ledger it can no longer even name. So it refuses the whole
+    operation and removes nothing. A red-team pass produced exactly that
+    half-deleted state; this proves the refusal holds.
+    """
+    from plaud_bridge.storage import Vault
+
+    cfg = _processed(tmp_path, monkeypatch)  # fills an encrypted memory ledger
+    db = Database(cfg.path("database"))
+    try:
+        rec_id = db.query()[0]["id"]
+        planned = Archive(cfg, db).plan_forget(rec_id)
+        assert planned, "nothing was found to delete"
+    finally:
+        db.close()
+
+    monkeypatch.delenv("PLAUD_BRIDGE_PASSPHRASE")
+    assert cmd_forget(_args(cfg, "forget", rec_id, "--yes")) == 1
+    assert "locked" in capsys.readouterr().out.lower()
+
+    # The refusal is total: the plaintext half must all still be on disk.
+    for path in planned:
+        assert path.exists(), f"{path} was deleted despite the locked-vault refusal"
+
+    monkeypatch.setenv("PLAUD_BRIDGE_PASSPHRASE", "a-long-enough-test-passphrase")
+    db = Database(cfg.path("database"))
+    try:
+        assert db.load(rec_id) is not None, "the index row was deleted despite the refusal"
+    finally:
+        db.close()
+
+
 # =========================================================================
 # Export
 # =========================================================================

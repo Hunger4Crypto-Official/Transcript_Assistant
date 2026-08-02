@@ -529,6 +529,44 @@ def set_status(cfg, vault: Vault, followup_id: str, status: str, *,
     return match
 
 
+def forget_recording(cfg, vault: Vault, recording_id: str) -> list[str]:
+    """
+    Drop every status entry tied to one recording. Returns the ids removed.
+
+    `forget` promises a recording leaves no trace. The status file keeps, per
+    item, the id of the recording a commitment came from and the profile it
+    belonged to, so an entry left behind still names a recording that is meant
+    to be gone -- and records that a promise from it was marked done. This
+    removes every such entry and rewrites the file.
+
+    The caller (`archive.forget`) refuses the whole operation when the vault is
+    locked and any encrypted store exists, so reaching here with an unreadable
+    encrypted state file is a bug worth surfacing rather than swallowing --
+    which `_load_state` does by raising. A plaintext state file (the no-vault
+    fallback) is read and rewritten in place, no passphrase required.
+    """
+    path = state_path(cfg)
+    if not path.exists():
+        return []
+
+    saved = _load_state(cfg, vault)
+    removed = [
+        fid for fid, entry in saved.items()
+        if str(entry.get("recording_id", "")) == recording_id
+    ]
+    if not removed:
+        return []
+
+    for fid in removed:
+        saved.pop(fid, None)
+    _save_state(cfg, vault, saved)
+    log.info(
+        "follow-ups: dropped %d status entr%s tied to %s",
+        len(removed), "y" if len(removed) == 1 else "ies", recording_id,
+    )
+    return removed
+
+
 def _resolve(followup_id: str, items: list[FollowUp],
              saved: dict[str, dict[str, Any]]) -> FollowUp:
     """Find one follow-up by exact id or unique prefix, in the list or the state."""
