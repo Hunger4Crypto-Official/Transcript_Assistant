@@ -9,6 +9,7 @@ third party.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Any
 
 from ..logging_setup import get
@@ -56,6 +57,12 @@ def complete_json(cfg, system: str, user: str, local_only: bool = False,
         )
 
     problems: list[str] = []
+    # A provider that answered but returned unparseable JSON still billed for the
+    # call. If the chain then falls through to another provider, that earlier
+    # spend has to travel with it or the recording's cost silently undercounts
+    # every wasted attempt -- which is exactly the spend a guardrail watching for
+    # a runaway loop needs to see.
+    wasted = 0.0
     for provider in chain:
         ok, why = provider.available()
         if not ok:
@@ -63,9 +70,21 @@ def complete_json(cfg, system: str, user: str, local_only: bool = False,
             continue
         try:
             response = provider.complete(system, user, max_tokens)
-            return extract_json(response.text), response
         except LLMError as exc:
             problems.append(f"{provider.name}: {exc}")
             log.warning("LLM provider %s failed, trying next: %s", provider.name, exc)
+            continue
+        try:
+            data = extract_json(response.text)
+        except LLMError as exc:
+            # The call succeeded and was billed; only the body was unusable.
+            wasted += response.cost_usd
+            problems.append(f"{provider.name}: {exc}")
+            log.warning("LLM provider %s returned unparseable JSON, trying next: %s",
+                        provider.name, exc)
+            continue
+        if wasted:
+            response = replace(response, cost_usd=response.cost_usd + wasted)
+        return data, response
 
     raise LLMError("all LLM providers failed:\n  - " + "\n  - ".join(problems))

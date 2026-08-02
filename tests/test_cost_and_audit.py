@@ -318,3 +318,34 @@ def test_review_surfaces_expired_artifacts_without_deleting_them(sandbox, capsys
     assert "past their expiry" in out
     assert "retention --execute" in out
     assert all(p.exists() for p in paths), "review deleted something; it only reports"
+
+
+def test_a_billed_but_unparseable_response_still_counts_toward_cost(monkeypatch):
+    """
+    A provider that answered but returned unparseable JSON was billed for the
+    call. When the chain falls through to the next provider, that earlier spend
+    has to travel with it -- otherwise the recording's cost silently undercounts
+    every wasted attempt, and the runaway-loop guardrail never sees it.
+    """
+    from plaud_bridge.llm import registry
+    from plaud_bridge.llm.base import LLMResponse
+
+    class FakeProvider:
+        def __init__(self, name, text, cost):
+            self.name, self._text, self._cost = name, text, cost
+
+        def available(self):
+            return True, "ok"
+
+        def complete(self, system, user, max_tokens=None):
+            return LLMResponse(text=self._text, provider=self.name, model="m",
+                               cost_usd=self._cost)
+
+    chain = [FakeProvider("first", "sorry, here is your answer:", 0.02),
+             FakeProvider("second", '{"ok": true}', 0.05)]
+    monkeypatch.setattr(registry, "build_llm_chain", lambda cfg, local_only: chain)
+
+    data, response = registry.complete_json(cfg=None, system="s", user="u")
+    assert data == {"ok": True}
+    assert response.provider == "second"
+    assert abs(response.cost_usd - 0.07) < 1e-9, "the wasted first-provider spend was dropped"

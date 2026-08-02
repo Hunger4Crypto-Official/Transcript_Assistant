@@ -618,7 +618,12 @@ def cmd_forget(args) -> int:
             print(f"  {path}")
         if not targets:
             print("  (no files on disk; the index entry will be removed)")
-        print("\nThe audit log keeps a record that this was deleted. Nothing else survives.")
+        print(
+            "\nThis removes the files above, the index entry, and the memory, "
+            "follow-up, and saved-answer traces. The audit log keeps a record "
+            "that the deletion happened. It cannot reach a digest or export you "
+            "saved elsewhere yourself -- delete those where you put them."
+        )
 
         if not args.yes and not _confirm("\nType FORGET to confirm: ", "FORGET"):
             return 1
