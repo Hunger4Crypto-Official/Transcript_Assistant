@@ -257,6 +257,14 @@ def collect(cfg, db, archive, *, profile: str | None = None, days: int | None = 
             pid = str(analysis.get("profile_id", ""))
             if pid not in cfg.profiles:
                 continue
+            if profile is not None and pid != profile:
+                # `db.query(profile_id=...)` joins on routes, so a recording
+                # co-routed to the asked-for profile but GOVERNED by a stricter
+                # one comes back carrying that stricter profile's analysis too.
+                # Reading it here is how `followups --profile insurance_agent`
+                # surfaces a Husband or Father commitment. Filtering to the
+                # requested profile keeps a scoped query scoped.
+                continue
             if pid in personal and profile is None and not include_personal:
                 continue
             if analysis.get("error"):

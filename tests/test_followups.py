@@ -365,6 +365,46 @@ def test_a_failed_analysis_contributes_nothing(bench):
     assert bench.collect() == []
 
 
+def test_a_scoped_query_does_not_leak_a_co_routed_personal_commitment(bench):
+    """
+    `db.query(profile_id=X)` joins on routes, so a recording co-routed to a work
+    profile but governed by a locked personal one comes back carrying the
+    personal analysis too. `followups --profile insurance_agent` must not
+    surface the Husband commitment riding along on that record.
+    """
+    rec = Recording(
+        id="rec_corouted", source_name="rec_corouted.txt",
+        source_path="/inbox/rec_corouted.txt", content_hash="hash-co", kind="text",
+        recorded_at=datetime.now(timezone.utc),
+    )
+    rec.transcript = Transcript(segments=[Segment(0.0, 2.0, "spoken words", "Sasson")])
+    rec.routes = [RouteMatch(profile_id="husband", confidence=0.95),
+                  RouteMatch(profile_id="insurance_agent", confidence=0.95)]
+    rec.compliance.governing_profile = "husband"
+    rec.compliance.encrypt_at_rest = True
+    rec.analyses = [
+        ProfileAnalysis(profile_id="husband",
+                        fields={"commitments_i_made": [quote("book the anniversary dinner")]}),
+        ProfileAnalysis(profile_id="insurance_agent",
+                        fields={"next_action": "Send two quote options"}),
+    ]
+    # Husband governs, so this is encrypted at rest: the whole record lives in
+    # the vault and the index holds withheld fields, exactly as the pipeline
+    # persists it.
+    rec.artifact_paths["analysis"] = str(
+        bench.vault.write("rec_corouted.analysis.json", rec.to_json(), rec.id)
+    )
+    bench.db.upsert(rec)
+
+    scoped = bench.collect(profile="insurance_agent")
+    texts = [i.text for i in scoped]
+    assert "Send two quote options" in texts, "the asked-for profile's own commitment is missing"
+    assert all("anniversary" not in t for t in texts), (
+        "a scoped work-profile query surfaced a locked personal commitment"
+    )
+    assert all(i.profile_id == "insurance_agent" for i in scoped)
+
+
 # =========================================================================
 # Encrypted analyses, and ones that will not open
 # =========================================================================
