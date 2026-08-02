@@ -253,6 +253,52 @@ def test_a_strong_family_keyword_match_cannot_be_scored_away(tmp_path, monkeypat
     )
 
 
+class CoRedactStub(StubLLM):
+    """Leads with a cloud-permitting profile and co-routes a redacting one."""
+
+    def __init__(self):
+        super().__init__()
+        self.extract_bodies: list[str] = []
+
+    def __call__(self, cfg, system, user, local_only=False, max_tokens=None):
+        if '"scores"' in user:
+            return {"scores": [
+                {"profile_id": "sales_trainer", "score": 0.95, "evidence": ["debrief"]},
+                {"profile_id": "insurance_agent", "score": 0.90, "evidence": ["fact find"]},
+                {"profile_id": "father", "score": 0.02, "evidence": []},
+                {"profile_id": "husband", "score": 0.02, "evidence": []},
+            ]}, self._response()
+        self.extract_bodies.append(user)
+        return {"requires_human_attention": False}, self._response()
+
+
+def test_redaction_is_a_floor_when_the_lead_profile_does_not_redact(tmp_path, monkeypatch):
+    """
+    Redaction before a cloud model is a floor, like locality and encryption. With
+    strictest_profile_governs off and a lead profile that does not redact, a
+    co-routed profile that does must still force redaction, or PII reaches the
+    model unredacted. (No shipped profile skips redaction; this pins the floor
+    for a custom one that would.)
+    """
+    cfg, stub = build_sandbox(tmp_path, monkeypatch, stub=CoRedactStub(),
+                              overrides={"compliance": {"strictest_profile_governs": False}})
+    cfg.profile("sales_trainer").redact_before_llm = False
+    drop(cfg, "sales_trainer-debrief.txt",
+         "Sasson: My SSN is 123-45-6789 and I record these, is that okay?\n"
+         "Marcus: Yeah that's fine.\n")
+
+    pipe = Pipeline(cfg)
+    try:
+        pipe.run()
+        assert stub.extract_bodies, "no extraction happened"
+        for body in stub.extract_bodies:
+            assert "123-45-6789" not in body, (
+                "PII reached the model because the lead profile skipped redaction"
+            )
+    finally:
+        pipe.close()
+
+
 def test_encryption_at_rest_is_a_floor_not_a_routing_preference(tmp_path, monkeypatch):
     """
     strictest_profile_governs is a routing preference; encryption at rest is a

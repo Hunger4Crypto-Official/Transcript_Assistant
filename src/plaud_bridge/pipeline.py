@@ -434,7 +434,20 @@ class Pipeline:
                 portion = rec.transcript
 
             body = portion.labelled_text()
-            redacted, counts = self.gate.redact_for_llm(body, governing)
+            # Redaction before a cloud model is a floor, like locality and
+            # encryption: if ANY matched profile wants its content redacted, the
+            # text is redacted, whichever profile governs. Keying it to the
+            # governing profile alone meant that with strictest_profile_governs
+            # off, a redact-requiring profile could be overridden by a lead one
+            # that does not, and PII would reach the model unredacted.
+            redact_profile = governing
+            if not governing.redact_before_llm:
+                for pid in rec.profile_ids:
+                    other = self.cfg.profile(pid) if pid in self.cfg.profiles else None
+                    if other and other.redact_before_llm:
+                        redact_profile = other
+                        break
+            redacted, counts = self.gate.redact_for_llm(body, redact_profile)
             for name, count in counts.items():
                 rec.compliance.redactions[name] = rec.compliance.redactions.get(name, 0) + count
 
