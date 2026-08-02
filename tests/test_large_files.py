@@ -115,6 +115,41 @@ def test_truncation_on_an_exact_chunk_boundary_is_detected(vault, tmp_path):
     assert not (tmp_path / "out.mp3").exists()
 
 
+def test_an_oversized_chunk_length_is_refused_before_allocating(vault, tmp_path):
+    """
+    The per-chunk length field is attacker-controlled in a tampered file, and the
+    reader preallocates it before the GCM tag is ever checked. A ~40-byte crafted
+    file must be rejected on the length -- not turned into a multi-gigabyte
+    allocation. verify_stream (which Archive.verify runs over every streamed
+    artifact) walks the same reader, so this is reachable from a routine check.
+    """
+    from plaud_bridge.storage.vault import MAGIC_STREAM, NONCE_LEN, SALT_LEN
+
+    crafted = (
+        MAGIC_STREAM
+        + b"\x00" * SALT_LEN
+        + (4 * 1024 * 1024).to_bytes(4, "big")   # a plausible declared chunk size
+        + b"\x00" * NONCE_LEN
+        + b"\xff\xff\xff\xff"                     # body length field: ~4 GiB
+        + b"\x00\x00"                             # but only two body bytes exist
+    )
+    path = tmp_path / "evil.enc"
+    path.write_bytes(crafted)
+    with pytest.raises(VaultError, match="out of range"):
+        vault.read_stream(path, tmp_path / "out.bin", "rec_x")
+
+
+def test_an_implausible_declared_chunk_size_is_refused(vault, tmp_path):
+    """The header's own chunk size is attacker-controlled too, so it is bounded."""
+    from plaud_bridge.storage.vault import MAGIC_STREAM, SALT_LEN
+
+    crafted = MAGIC_STREAM + b"\x00" * SALT_LEN + b"\xff\xff\xff\xff"
+    path = tmp_path / "evil2.enc"
+    path.write_bytes(crafted)
+    with pytest.raises(VaultError, match="implausible chunk size"):
+        vault.read_stream(path, tmp_path / "out.bin", "rec_x")
+
+
 def test_data_appended_after_the_final_chunk_is_detected(vault, tmp_path):
     """
     Every real chunk decrypts, and the final one is authenticated as final -- but

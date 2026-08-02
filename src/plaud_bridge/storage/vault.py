@@ -36,6 +36,15 @@ MAGIC = b"PBV1"
 # needs the plaintext and the ciphertext resident at the same time.
 MAGIC_STREAM = b"PBS1"
 STREAM_CHUNK = 4 * 1024 * 1024
+# A hard ceiling on the chunk size a streamed file may DECLARE in its header, and
+# therefore on how large a single body-length field may ask the reader to
+# allocate. The declared size and the per-chunk length are both attacker-
+# controlled in a tampered file, and `read` preallocates the full requested
+# buffer before the GCM tag is ever checked -- so without this a ~40-byte crafted
+# header forces a multi-gigabyte allocation. 64 MiB is well above the 4 MiB the
+# writer uses while still bounding the damage.
+STREAM_CHUNK_MAX = 64 * 1024 * 1024
+GCM_TAG_LEN = 16
 SCRYPT_N = 2**15
 SCRYPT_R = 8
 SCRYPT_P = 1
@@ -230,7 +239,20 @@ class Vault:
                 return
 
             salt = fin.read(SALT_LEN)
-            fin.read(4)                       # chunk size, informational
+            raw_chunk_size = fin.read(4)
+            if len(salt) != SALT_LEN or len(raw_chunk_size) != 4:
+                raise VaultError("vault stream header is truncated")
+            # The header's declared chunk size is what bounds every body read
+            # below. It is attacker-controlled in a tampered file, so it is
+            # itself bounded before it is trusted -- otherwise it just moves the
+            # unbounded allocation up one line.
+            chunk_size = int.from_bytes(raw_chunk_size, "big")
+            if not 0 < chunk_size <= STREAM_CHUNK_MAX:
+                raise VaultError(
+                    "vault stream declares an implausible chunk size; the file is "
+                    "corrupt or not a vault stream."
+                )
+            max_body = chunk_size + GCM_TAG_LEN
             key = self._derive(salt)
             aes = AESGCM(key)
 
@@ -243,7 +265,19 @@ class Vault:
                 raw = fin.read(4)
                 if len(nonce) != NONCE_LEN or len(raw) != 4:
                     raise VaultError("vault file is truncated mid-chunk")
-                body = fin.read(int.from_bytes(raw, "big"))
+                body_len = int.from_bytes(raw, "big")
+                # A body is one plaintext chunk plus the 16-byte GCM tag, so it
+                # cannot exceed max_body and cannot be smaller than a tag. Reject
+                # an out-of-range length BEFORE read() preallocates it, which is
+                # the whole point: no ~4 GiB buffer from a crafted length field.
+                if not GCM_TAG_LEN <= body_len <= max_body:
+                    raise VaultError(
+                        "vault chunk length is out of range; the file is corrupt "
+                        "or has been tampered with."
+                    )
+                body = fin.read(body_len)
+                if len(body) != body_len:
+                    raise VaultError("vault file is truncated mid-chunk")
 
                 # Try "not final" first, then "final". The AAD is what makes a
                 # dropped or reordered chunk fail rather than silently
