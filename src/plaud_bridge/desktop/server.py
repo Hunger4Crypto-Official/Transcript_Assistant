@@ -95,6 +95,8 @@ class AppServer:
         self.controller = controller or AppController()
         self.token = secrets.token_urlsafe(24)
         self.job = _Job()
+        self._pending_update = None
+        self._httpd = None
         self.controller.ensure_installed()
 
     # ---- actions the handler calls -------------------------------------
@@ -138,6 +140,51 @@ class AppServer:
     def digest_html(self, include_personal: bool) -> str:
         out = self.controller.write_digest(include_personal=include_personal)
         return out.read_text(encoding="utf-8")
+
+    def update_check(self) -> dict:
+        """
+        Whether a newer release exists. Soft in every failure direction: the
+        page renders "no banner" for offline, private-repo-without-token, and
+        no-releases alike. `checks_disabled` is reported so the page can say
+        nothing at all rather than "up to date" it cannot know.
+        """
+        from . import update
+
+        if update.checks_disabled():
+            return {"available": False, "disabled": True}
+        info = update.check_for_update()
+        if info is None:
+            return {"available": False}
+        self._pending_update = info
+        return {"available": True, "version": info.version,
+                "current": info.current, "notes": info.notes}
+
+    def update_apply(self) -> dict:
+        """
+        Install the update the person clicked on, then schedule our own exit.
+
+        The verified download and the handoff script are update.apply_update's
+        job; this only refuses when there is nothing pending (the page must
+        check first -- applying an update the server never offered would let a
+        stale click install who-knows-what) and, on success, stops the server a
+        beat after the response flushes so the updater script can take over.
+        """
+        from . import update
+
+        info = getattr(self, "_pending_update", None)
+        if info is None:
+            return {"applied": False, "error": "no update has been offered; check first"}
+        try:
+            message = update.apply_update(info)
+        except update.UpdateError as exc:
+            return {"applied": False, "error": str(exc)}
+        threading.Timer(1.5, self._shutdown_for_update).start()
+        return {"applied": True, "message": message}
+
+    def _shutdown_for_update(self) -> None:  # pragma: no cover - exercised on Windows
+        httpd = getattr(self, "_httpd", None)
+        if httpd is not None:
+            threading.Thread(target=httpd.shutdown, daemon=True).start()
 
     # ---- the http layer -------------------------------------------------
     def make_server(self, host: str = "127.0.0.1", port: int = 0) -> ThreadingHTTPServer:
@@ -208,6 +255,11 @@ class AppServer:
                                    "text/html; charset=utf-8")
                     except Exception as exc:  # noqa: BLE001
                         self._send(500, f"could not build the digest: {exc}".encode(), "text/plain")
+                elif route == "/api/update/check":
+                    try:
+                        self._json(200, app.update_check())
+                    except Exception:  # noqa: BLE001 - a failed check is "no banner"
+                        self._json(200, {"available": False})
                 else:
                     self._json(404, {"error": "no such route"})
 
@@ -244,10 +296,18 @@ class AppServer:
                     started = app.start_processing(self._brain(data.get("brain")))
                     self._json(200 if started else 409,
                                {"started": started, "error": None if started else "already running"})
+                elif route == "/api/update/apply":
+                    result = app.update_apply()
+                    self._json(200 if result.get("applied") else 400, result)
                 else:
                     self._json(404, {"error": "no such route"})
 
-        return ThreadingHTTPServer((host, port), Handler)
+        httpd = ThreadingHTTPServer((host, port), Handler)
+        # The apply step needs a handle to stop the server once the updater
+        # script is spawned; stashing it here keeps make_server's contract
+        # (build and return, never serve) unchanged.
+        self._httpd = httpd
+        return httpd
 
 
 _PAGE = """<!doctype html>
@@ -291,6 +351,17 @@ _PAGE = """<!doctype html>
 <body><div class="wrap">
   <h1>Plaud Bridge</h1>
   <p class="sub">Turn your recordings into a digest. Nothing private leaves this computer.</p>
+
+  <div class="card" id="updatebar" style="display:none">
+    <div class="row">
+      <div style="flex:1">
+        <span class="name" id="updatetitle">Update available</span>
+        <div class="detail" id="updatenotes"></div>
+      </div>
+      <button class="primary" id="updatebtn" onclick="applyUpdate()">Update now</button>
+    </div>
+    <div class="detail" id="updatemsg"></div>
+  </div>
 
   <div class="card">
     <label>1 &middot; Your passphrase <small>(encrypts private recordings &mdash; there is no recovery)</small></label>
@@ -375,6 +446,25 @@ async function poll(){
     if(j.error){log.textContent+="\\n\\nSomething went wrong: "+j.error;}
     else{document.getElementById("view").disabled=false;}}}
 function openDigest(){window.open("/api/digest?token="+TOKEN,"_blank");}
-refresh();
+async function checkUpdate(){
+  try{
+    const j=await (await fetch("/api/update/check?token="+TOKEN)).json();
+    if(!j.available) return;
+    document.getElementById("updatetitle").textContent=
+      "Update available: "+j.version+" (you have "+j.current+")";
+    document.getElementById("updatenotes").textContent=j.notes||"";
+    document.getElementById("updatebar").style.display="block";
+  }catch(e){/* no banner is the correct rendering of "could not check" */}}
+async function applyUpdate(){
+  const btn=document.getElementById("updatebtn"); btn.disabled=true;
+  const msg=document.getElementById("updatemsg");
+  msg.textContent="Downloading and verifying...";
+  try{
+    const r=await fetch("/api/update/apply",{method:"POST",headers:H,body:"{}"});
+    const j=await r.json();
+    if(j.applied){msg.textContent=j.message+" You can close this tab; the app reopens itself.";}
+    else{msg.textContent="Could not update: "+(j.error||"unknown"); btn.disabled=false;}
+  }catch(e){msg.textContent="Could not update: "+e; btn.disabled=false;}}
+refresh(); checkUpdate();
 </script>
 </body></html>"""

@@ -18,6 +18,13 @@ single implementation.
   memory; the file on disk is never rewritten.
 - `.github/workflows/build-windows.yml` builds the double-clickable
   `PlaudBridge.exe` on a Windows runner; see `packaging/README.md`.
+- The app keeps itself current: it checks GitHub Releases on launch and shows
+  an "Update available" banner; one click downloads the new build, verifies it
+  against the SHA-256 the CI published beside it, and swaps itself out.
+  Deliberately not silent -- an app that replaces its own executable in the
+  background is a supply-chain attack with a release schedule. A release
+  without its checksum is refused. `PLAUD_BRIDGE_NO_UPDATE_CHECK=1` turns the
+  check off; a private repo needs `GITHUB_TOKEN` for the check to see releases.
 
 ### The digest grew charts
 

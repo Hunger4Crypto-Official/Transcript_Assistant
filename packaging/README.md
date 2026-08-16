@@ -47,6 +47,24 @@ The app appears at `dist\PlaudBridge\PlaudBridge.exe`. (ffmpeg isn't bundled by 
 local build unless you drop `ffmpeg.exe` and `ffprobe.exe` into `packaging\bin\`
 first; without it the app runs but tells you to install ffmpeg.)
 
+## Updates
+
+The app checks for a newer release when it opens and shows an **Update
+available** banner. Clicking **Update now** downloads the new build, verifies
+it against the checksum the build published, closes the app, swaps the folder,
+and reopens itself. Notes:
+
+- Updates come from this repo's **Releases**, so they only exist for builds
+  made from a version tag (`git tag v1.0.1 && git push --tags`). Manual
+  Actions-tab builds are downloads, not updates.
+- If this repo is **private**, the installed app can only see releases when a
+  `GITHUB_TOKEN` environment variable is set on that machine. If the repo is
+  public, it just works.
+- The check is one HTTPS request to GitHub at launch. To turn it off entirely,
+  set `PLAUD_BRIDGE_NO_UPDATE_CHECK=1`.
+- Your data and tuned config live outside the app folder, so an update never
+  touches them.
+
 ## The two "brains"
 
 - **Free cloud key** — get a free key at groq.com, paste it in. Works for work

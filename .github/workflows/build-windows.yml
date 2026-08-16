@@ -30,6 +30,18 @@ jobs:
           pip install -r requirements.txt
           pip install faster-whisper pyinstaller pillow
 
+      # Tag builds bake the tag into __version__, so the built app knows what
+      # it is. Without this, an app built from tag v1.0.1 still reports the
+      # hardcoded version and offers itself its own update forever.
+      - name: Stamp the version from the tag
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}".TrimStart("v")
+          $init = "src/plaud_bridge/__init__.py"
+          (Get-Content $init) -replace '__version__ = ".*"', "__version__ = `"$tag`"" | Set-Content $init
+          Select-String -Path $init -Pattern "__version__"
+
       - name: Draw the icon
         run: python packaging/make_icon.py
 
@@ -60,15 +72,28 @@ jobs:
         shell: pwsh
         run: Compress-Archive -Path dist/PlaudBridge/* -DestinationPath PlaudBridge-windows.zip
 
+      # The checksum the in-app updater verifies before installing anything.
+      # A release without this file is refused by the updater on purpose.
+      - name: Publish the checksum
+        shell: pwsh
+        run: |
+          $hash = (Get-FileHash -Algorithm SHA256 PlaudBridge-windows.zip).Hash.ToLower()
+          Set-Content -Path PlaudBridge-windows.zip.sha256 -Value "$hash  PlaudBridge-windows.zip" -NoNewline
+          Get-Content PlaudBridge-windows.zip.sha256
+
       - name: Upload the download
         uses: actions/upload-artifact@v4
         with:
           name: PlaudBridge-windows
-          path: PlaudBridge-windows.zip
+          path: |
+            PlaudBridge-windows.zip
+            PlaudBridge-windows.zip.sha256
           retention-days: 30
 
       - name: Attach to the release (tag builds only)
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          files: PlaudBridge-windows.zip
+          files: |
+            PlaudBridge-windows.zip
+            PlaudBridge-windows.zip.sha256
