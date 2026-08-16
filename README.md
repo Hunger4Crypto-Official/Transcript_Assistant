@@ -507,6 +507,55 @@ Everything else goes. An audit trail that forgets deletions is not a trail.
 
 ---
 
+## Back it up, and get it back
+
+The vault has no key recovery — that is the point of a vault — which makes a
+dead disk the one failure that loses everything. So back up:
+
+```bash
+python run.py backup                       # one encrypted .pbb file, safe anywhere
+python run.py backup --out /mnt/drive/     # straight onto the external disk
+python run.py restore plaud-backup-*.pbb   # refuses to overwrite without --force
+```
+
+The bundle holds the vault, the index, the outbox, the quarantine, and your
+tuned config, encrypted whole with the vault's own cipher — safe to sit on a
+drive or in a cloud folder this tool does not control. Restoring needs the
+same passphrase; there is no backup of the backup's key, on purpose. Put the
+passphrase in your password manager and put `backup` in your scheduler next to
+`run`.
+
+## When the gate holds a batch of recordings
+
+Processing an old backlog means recordings from before you announced every
+call, and the consent gate will hold them — correctly. Triage at scale:
+
+```bash
+python run.py quarantine                   # everything held, with the reason
+python run.py quarantine --release-all     # bulk release; typed confirmation
+python run.py quarantine --forget-all      # bulk delete, through real forget
+```
+
+`--release-all` never includes an explicit refusal. Someone who said "don't
+record this" is not a batch decision; those release one at a time with
+`release <id>`, or not at all.
+
+## The clickable app
+
+Prefer a window? `python desktop_app.py` opens the same pipeline in your
+browser — passphrase, an Offline/free-cloud-key brain switch, drop recordings,
+Process, Open digest. `packaging/README.md` covers building the double-click
+Windows `PlaudBridge.exe`. The HTML digest opens with charts either way:
+minutes per section, activity across the window, and spend.
+
+Before committing a big backlog to local processing, measure this machine:
+
+```bash
+python scripts/bench.py one-recording.mp3 --backlog-hours 200
+```
+
+---
+
 ## Running it without remembering to
 
 ```bash

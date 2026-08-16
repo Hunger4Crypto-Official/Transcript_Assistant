@@ -1,5 +1,59 @@
 # Changelog
 
+## Unreleased — the clickable app, the charts, and the safety net
+
+### A window instead of a terminal
+
+Double-click and use it from a browser: `desktop_app.py` (and the packaged
+Windows build under `packaging/`) opens a small local page — passphrase, a
+brain switch, drop your recordings, Process, Open digest. It is a thin skin
+over the same pipeline; the locality locks, consent gate, and vault keep their
+single implementation.
+
+- Loopback-only, token-guarded, Host-checked. Another machine — or a hostile
+  website you happen to have open — cannot drive it.
+- The Offline brain diagnoses itself: it probes the local model server and
+  tells you the one command to run — "install from ollama.com" vs
+  `ollama pull <model>` vs ready. Choosing Offline enables `llm.local` in
+  memory; the file on disk is never rewritten.
+- `.github/workflows/build-windows.yml` builds the double-clickable
+  `PlaudBridge.exe` on a Windows runner; see `packaging/README.md`.
+
+### The digest grew charts
+
+`digest --format html` now opens with an "In Charts" section: minutes per
+section, minutes per day across the window (weeks when the window is long),
+and API spend per section. Pure inline SVG — no scripts, no network, prints
+cleanly, light and dark. Charts are computed from the same sections the text
+was rendered from, so an excluded personal profile cannot appear in a chart by
+construction.
+
+### One file that brings the archive back
+
+`backup` writes the vault, index, outbox, quarantine, and your tuned config
+into a single file encrypted with the vault's own streaming cipher — safe on
+an external drive or in a cloud folder, and refused outright without a
+passphrase. `restore` decrypts, unpacks, and verifies everything in a staging
+directory first; a wrong passphrase or tampered file changes nothing. The
+index is snapshotted through SQLite's backup API so a live database cannot
+restore as corruption.
+
+### Triage the quarantine at scale
+
+`quarantine` lists everything held, with the reason distilled: explicit
+refusal, no announcement found, or a static consent gate. `--release-all`
+demands its own typed confirmation and never includes a refusal — those stay
+one-at-a-time on purpose. `--forget-all` routes through the real `forget`,
+inheriting its locked-vault refusal and derived-store purging. A run that
+quarantines now points you here.
+
+### Measure before you migrate
+
+`python scripts/bench.py recording.mp3` times ffmpeg and local transcription
+on one real file and projects your backlog: the realtime factor on *this*
+machine is the number that decides local-versus-cloud, and specs do not know
+it.
+
 ## Unreleased — names, answers, memory, and follow-through
 
 ### Ask the archive a question
