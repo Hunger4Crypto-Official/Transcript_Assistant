@@ -296,8 +296,7 @@ def test_forget_purges_the_derived_stores_not_only_the_pipeline_artifacts(
     """
     import json
 
-    from plaud_bridge.followups import (FollowUp, _load_state, set_status,
-                                        stable_id)
+    from plaud_bridge.followups import FollowUp, _load_state, set_status, stable_id
     from plaud_bridge.memory import MemoryStore
     from plaud_bridge.storage import Vault
 
@@ -365,7 +364,6 @@ def test_forget_refuses_to_half_delete_when_the_vault_is_locked(
     operation and removes nothing. A red-team pass produced exactly that
     half-deleted state; this proves the refusal holds.
     """
-    from plaud_bridge.storage import Vault
 
     cfg = _processed(tmp_path, monkeypatch)  # fills an encrypted memory ledger
     db = Database(cfg.path("database"))

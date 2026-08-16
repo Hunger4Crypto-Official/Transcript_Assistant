@@ -26,10 +26,10 @@ from __future__ import annotations
 import os
 import shutil
 import sys
+from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Callable
 
 from ..config import Config
 from ..digest import DigestBuilder, DigestOptions

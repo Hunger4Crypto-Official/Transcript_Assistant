@@ -216,7 +216,7 @@ def test_a_nonsense_duration_is_refused(monkeypatch, tmp_path, value):
     """
     class _Proc:
         returncode = 0
-        stdout = '{"format": {"duration": "%s"}}' % value
+        stdout = '{"format": {"duration": "' + value + '"}}'
         stderr = ""
 
     monkeypatch.setattr("plaud_bridge.audio.prepare._run", lambda *a, **k: _Proc())

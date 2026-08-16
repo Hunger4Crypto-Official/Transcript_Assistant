@@ -193,8 +193,7 @@ def test_the_withheld_index_leaks_no_transcript_derived_string():
     the transcript and were riding into payload_json in the clear. The old test
     greps one phrase that happens to appear in neither, so it missed this.
     """
-    from plaud_bridge.models import (ComplianceVerdict, Recording, RouteMatch,
-                                     Segment, Transcript)
+    from plaud_bridge.models import ComplianceVerdict, Recording, RouteMatch, Segment, Transcript
 
     rec = Recording(source_name="client.txt", kind="text")
     rec.transcript = Transcript(segments=[

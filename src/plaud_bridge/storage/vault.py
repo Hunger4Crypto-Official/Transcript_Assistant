@@ -142,7 +142,7 @@ class Vault:
         empty string. The name is the last path component only, so it does not
         depend on where the vault root happens to sit.
         """
-        return f"{recording_id}\x00{name}".encode("utf-8")
+        return f"{recording_id}\x00{name}".encode()
 
     def write(self, relative: str, data: str | bytes, recording_id: str = "") -> Path:
         payload = data.encode("utf-8") if isinstance(data, str) else data
