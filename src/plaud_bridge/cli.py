@@ -320,17 +320,17 @@ def cmd_digest(args) -> int:
             max_items=int(cfg.get("digest.max_items_per_section", 40)),
             title=args.title or "",
         )
-        markdown = DigestBuilder(cfg, db).render_markdown(opts)
+        builder = DigestBuilder(cfg, db)
 
-        # HTML is rendered from the markdown rather than from the section data,
-        # so the two formats cannot drift into saying different things.
+        # HTML is still rendered from the markdown — with charts layered on
+        # top — so the two formats cannot drift into saying different things.
         if args.format == "html":
             title = opts.title or (
                 cfg.profile(opts.profile_id).name if opts.profile_id else "Digest"
             )
-            body = to_html(markdown, title=title)
+            body = builder.render_html(opts, title=title)
         else:
-            body = markdown
+            body = builder.render_markdown(opts)
 
         if args.out:
             dest = Path(args.out)

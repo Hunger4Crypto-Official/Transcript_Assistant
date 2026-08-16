@@ -241,8 +241,13 @@ class DigestBuilder:
         return sections
 
     # ---- rendering ------------------------------------------------------
-    def render_markdown(self, opts: DigestOptions) -> str:
-        sections = self._collect(opts)
+    def render_markdown(self, opts: DigestOptions,
+                        sections: list[DigestSection] | None = None) -> str:
+        # `sections` lets render_html reuse one _collect for both the text and
+        # the charts, so the two cannot disagree about what the window held.
+        # Left to default, behavior is exactly what it always was.
+        if sections is None:
+            sections = self._collect(opts)
         voice = self.cfg.voice
         now = datetime.now(timezone.utc)
         start = now - timedelta(days=opts.days)
@@ -432,6 +437,23 @@ class DigestBuilder:
 
         out += voice.lines("digest.footer.sign_off")
         return "\n".join(out)
+
+    def render_html(self, opts: DigestOptions, title: str = "Digest") -> str:
+        """
+        The digest as a self-contained page, with charts.
+
+        The page body is still the markdown, converted (html.py), so the two
+        formats cannot drift into saying different things. The charts are an
+        HTML-only layer drawn from the same collected sections and slotted in
+        after the At a Glance table — they re-plot numbers the text already
+        prints and nothing more. See charts.py for the privacy reasoning.
+        """
+        from .charts import charts_html, inject_charts
+        from .html import to_html
+
+        sections = self._collect(opts)
+        page = to_html(self.render_markdown(opts, sections=sections), title=title)
+        return inject_charts(page, charts_html(sections, opts, self.cfg.voice))
 
     def _empty_note(self, opts: DigestOptions, voice) -> str:
         """What a section with nothing in it says. Per-profile wording wins."""
