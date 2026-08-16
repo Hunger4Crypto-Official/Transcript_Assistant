@@ -19,6 +19,7 @@ Plaud Bridge, without installing anything.
     python run.py memory                        what it has learned across recordings
     python run.py audit                         read the compliance audit log
     python run.py release <recording_id>        release a quarantined recording
+    python run.py quarantine                    triage everything in quarantine at once
     python run.py retention --execute           delete expired artifacts
     python run.py profiles                      show the routing table
     python run.py new-profile <id>              scaffold a profile from the template
