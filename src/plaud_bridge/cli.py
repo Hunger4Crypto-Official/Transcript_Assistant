@@ -19,6 +19,7 @@ Plaud Bridge command line.
     plaud-bridge memory                        what it has learned across recordings
     plaud-bridge audit                         read the compliance audit log
     plaud-bridge release <recording_id>        release a quarantined recording
+    plaud-bridge quarantine                    triage everything in quarantine at once
     plaud-bridge retention --execute           delete expired artifacts
     plaud-bridge profiles                      show the routing table
     plaud-bridge new-profile <id>              scaffold a profile from the template
@@ -262,6 +263,8 @@ def cmd_run(args) -> int:
         if stats.quarantined:
             print(f"\n{stats.quarantined} recording(s) quarantined. See "
                   f"{cfg.path('quarantine')} for why.")
+            print("Triage them together with `python run.py quarantine` "
+                  "(then --release-all / --forget-all).")
         if stats.failed:
             print(f"{stats.failed} recording(s) failed. Check the log at "
                   f"{cfg.path('logs') / 'bridge.log'}")
@@ -940,6 +943,33 @@ def cmd_audit(args) -> int:
         db.close()
 
 
+def _quarantine_media(cfg, recording_id: str) -> list[Path]:
+    """The held files a release would move. WHY.md stays; it is ours, not media."""
+    qdir = cfg.path("quarantine") / recording_id
+    if not qdir.is_dir():
+        return []
+    return [p for p in qdir.iterdir() if p.name != "WHY.md"]
+
+
+def _release_media(cfg, db, recording_id: str,
+                   detail: str = "released after human review") -> list[Path]:
+    """
+    The one release path: copy the held media back into the inbox and audit it.
+
+    Both `release <id>` and `quarantine --release-all` end here, so a bulk
+    release cannot quietly come to mean something different from a single one
+    -- same destination, same audit action, same actor.
+    """
+    inbox = cfg.path("inbox")
+    released: list[Path] = []
+    for path in _quarantine_media(cfg, recording_id):
+        dest = inbox / path.name
+        dest.write_bytes(path.read_bytes())
+        released.append(dest)
+    db.audit("quarantine_release", detail, recording_id, actor="human")
+    return released
+
+
 def cmd_release(args) -> int:
     """Move a quarantined file back to the inbox after human review."""
     cfg = _load(args)
@@ -949,27 +979,278 @@ def cmd_release(args) -> int:
         if not qdir.is_dir():
             print(f"no quarantine folder for {args.recording_id}")
             return 1
-        media = [p for p in qdir.iterdir() if p.name != "WHY.md"]
-        if not media:
+        if not _quarantine_media(cfg, args.recording_id):
             print("quarantine folder has no media to release")
             return 1
 
         if not args.yes:
-            print(f"\nAbout to release {len(media)} file(s) back to the inbox.\n")
+            print(f"\nAbout to release "
+                  f"{len(_quarantine_media(cfg, args.recording_id))} file(s) back to the inbox.\n")
             print((qdir / "WHY.md").read_text(encoding="utf-8"))
             if not _confirm("Type RELEASE to confirm you verified consent: ", "RELEASE"):
                 return 1
 
-        inbox = cfg.path("inbox")
-        for path in media:
-            dest = inbox / path.name
-            dest.write_bytes(path.read_bytes())
+        for dest in _release_media(cfg, db, args.recording_id):
             print(f"released -> {dest}")
 
-        db.audit("quarantine_release", "released after human review", args.recording_id, actor="human")
         print("\nRe-run `python run.py run --force` to process it.")
         print("The release is recorded in the audit log.")
         return 0
+    finally:
+        db.close()
+
+
+# ---- quarantine triage --------------------------------------------------
+#
+# A backlog run can quarantine dozens of recordings at once, correctly, and
+# the per-recording tools (`release <id>`, WHY.md files read one at a time) do
+# not scale to that without turning review into a rubber stamp. This surface
+# lists everything in quarantine with the reason distilled, and offers bulk
+# release and bulk forget behind the same typed-confirmation discipline that
+# `forget` uses. The one thing it refuses to scale is a refusal: a recording
+# whose verdict shows a party objecting is never part of --release-all, and
+# releasing it stays a one-at-a-time act on purpose.
+
+_RELEASE_ALL_PHRASE = "RELEASE ALL"
+_FORGET_ALL_PHRASE = "FORGET ALL"
+
+# Reason classes, in the order the listing shows them. Refusals come first
+# because they are the rows a person must not skim past.
+_CLASS_REFUSAL = "refusal"
+_CLASS_STATIC_GATE = "static-gate"
+_CLASS_NO_ANNOUNCEMENT = "no-announcement"
+
+_CLASS_TITLES = {
+    _CLASS_STATIC_GATE: "Standing consent gate is off",
+    _CLASS_NO_ANNOUNCEMENT: "No consent announcement detected",
+}
+
+
+def _classify_verdict(consent_status: str, reasons: list[str]) -> tuple[str, str]:
+    """
+    (class, one-line reason) distilled from a stored compliance verdict.
+
+    Refusal is checked first because it can co-occur with everything else and
+    must win: it is the one class policy forbids releasing in bulk. The text
+    matches are against sentences this codebase writes itself (gate.py and
+    consent.py), which is what makes matching on them safe; the consent_status
+    column is still consulted first so an index row alone is enough.
+    """
+    joined = " ".join(reasons)
+    if consent_status == "refused" or "objected to being recorded" in joined:
+        return _CLASS_REFUSAL, "a party objected to being recorded"
+    if "set to false" in joined:
+        line = next((r for r in reasons if "set to false" in r), "")
+        return _CLASS_STATIC_GATE, (line.split(". ")[0] or "standing consent gate is off")
+    # Whatever the consent detector noted is more specific than the boilerplate
+    # around it, so keep the first reason that is not scaffolding.
+    boilerplate = ("QUARANTINED", "local-only processing", "governs the whole recording")
+    for reason in reasons:
+        if not any(marker in reason for marker in boilerplate):
+            return _CLASS_NO_ANNOUNCEMENT, reason.split(". ")[0][:110]
+    return _CLASS_NO_ANNOUNCEMENT, "no consent announcement detected"
+
+
+def _reasons_from_why(qdir: Path) -> list[str]:
+    """The WHY.md bullets, for a folder whose index row is gone."""
+    try:
+        text = (qdir / "WHY.md").read_text(encoding="utf-8")
+    except OSError:
+        return []
+    reasons, in_reasons = [], False
+    for line in text.splitlines():
+        if line.startswith("## "):
+            in_reasons = line.strip() == "## Reasons"
+            continue
+        if in_reasons and line.startswith("- "):
+            reasons.append(line[2:].strip())
+    return reasons
+
+
+def _quarantine_entries(cfg, db) -> list[dict]:
+    """
+    Everything currently held in quarantine, with the reason distilled.
+
+    The quarantine directory is the ground truth for what can be released --
+    `release` moves files, not index rows -- but the index and the audit log
+    know things the folder does not: which verdict put it there, when, and
+    whether a human already released it. So this reads all three, and also
+    reports index rows whose folder has gone missing rather than pretending
+    the index is wrong.
+    """
+    qroot = cfg.path("quarantine")
+    ids: list[str] = []
+    if qroot.is_dir():
+        ids = sorted(p.name for p in qroot.iterdir() if p.is_dir())
+    for row in db.query(stage="quarantined", limit=10_000):
+        if row["id"] not in ids:
+            ids.append(row["id"])
+
+    entries: list[dict] = []
+    for rid in ids:
+        payload = db.load(rid) or {}
+        verdict = payload.get("compliance") or {}
+        reasons = list(verdict.get("reasons") or []) or _reasons_from_why(qroot / rid)
+        klass, reason = _classify_verdict(str(verdict.get("consent", "")), reasons)
+
+        held = db.audit_log(recording_id=rid, action="quarantine", limit=1)
+        when = (held[0]["at"] if held else payload.get("ingested_at") or "")[:16].replace("T", " ")
+        entries.append({
+            "id": rid,
+            "source": payload.get("source_name")
+                      or next((p.name for p in _quarantine_media(cfg, rid)), "(unknown source)"),
+            "when": when or "(unknown time)",
+            "klass": klass,
+            "reason": reason,
+            "media": _quarantine_media(cfg, rid),
+            "released": bool(db.audit_log(recording_id=rid, action="quarantine_release", limit=1)),
+        })
+    entries.sort(key=lambda e: e["when"])
+    return entries
+
+
+def _print_entry(entry: dict) -> None:
+    note = ""
+    if entry["released"]:
+        note = "  (already released; re-run `run.py run --force` to process it)"
+    elif not entry["media"]:
+        note = "  (folder has no media; releasable never, forgettable always)"
+    print(f"  {entry['id']}  {entry['when']}  {entry['source']}{note}")
+    print(f"      {entry['reason']}")
+
+
+def _quarantine_list(cfg, entries: list[dict]) -> int:
+    if not entries:
+        print("\nquarantine is empty\n")
+        return 0
+
+    refusals = [e for e in entries if e["klass"] == _CLASS_REFUSAL]
+    print(f"\n{len(entries)} recording(s) in quarantine :: {cfg.path('quarantine')}\n")
+
+    if refusals:
+        print(f"REFUSED -- a party said no ({len(refusals)}). "
+              "Never included in --release-all:")
+        for entry in refusals:
+            _print_entry(entry)
+        print("  A refusal is releasable only one at a time, `run.py release <id>`, after")
+        print("  you have listened and are certain the objection is not what it reads as.")
+        print("  Deleting these is the expected outcome, not an inconvenience.\n")
+
+    for klass, title in _CLASS_TITLES.items():
+        group = [e for e in entries if e["klass"] == klass]
+        if not group:
+            continue
+        print(f"{title} ({len(group)}):")
+        for entry in group:
+            _print_entry(entry)
+        print()
+
+    print("Full stored verdicts are in each folder's WHY.md.")
+    print("One at a time:  run.py release <id>   /  run.py forget <id>")
+    print("In bulk:        run.py quarantine --release-all   (refusals stay put)")
+    print("                run.py quarantine --forget-all    (deletes every trace)\n")
+    return 0
+
+
+def _quarantine_release_all(cfg, db, entries: list[dict], yes: bool) -> int:
+    refusals = [e for e in entries if e["klass"] == _CLASS_REFUSAL]
+    eligible = [e for e in entries
+                if e["klass"] != _CLASS_REFUSAL and e["media"] and not e["released"]]
+
+    if refusals:
+        print(f"\n{len(refusals)} recording(s) hold an explicit refusal and are "
+              "EXCLUDED from this bulk release:")
+        for entry in refusals:
+            _print_entry(entry)
+        print("  A refusal means the other party answered the consent question, and the")
+        print("  answer was no. Bulk release exists for recordings where nobody asked on")
+        print("  tape; it must never wave through one where somebody said no. If you are")
+        print("  certain a refusal was misread, release it alone: run.py release <id>.")
+        print("  That friction is the point.")
+
+    if not eligible:
+        already = [e for e in entries if e["released"]]
+        print("\nnothing eligible for bulk release"
+              + (f" ({len(already)} already released)" if already else "")
+              + ("" if entries else "; quarantine is empty"))
+        print()
+        return 0
+
+    print(f"\nAbout to release {len(eligible)} recording(s) back to the inbox:\n")
+    for entry in eligible:
+        _print_entry(entry)
+    print("\nReleasing is an affirmation, for EVERY recording above, that you verified")
+    print("consent was actually obtained even though the gate could not hear it --")
+    print("not a way to empty a folder. Each release is written to the audit log.")
+
+    if not yes and not _confirm(
+        f"\nType {_RELEASE_ALL_PHRASE} to confirm you verified consent for all of them: ",
+        _RELEASE_ALL_PHRASE,
+    ):
+        return 1
+
+    print()
+    for entry in eligible:
+        for dest in _release_media(
+            cfg, db, entry["id"],
+            detail="released after human review (quarantine --release-all)",
+        ):
+            print(f"released -> {dest}")
+
+    print(f"\nreleased {len(eligible)} recording(s)"
+          + (f"; {len(refusals)} refusal(s) stay quarantined" if refusals else ""))
+    print("Re-run `python run.py run --force` to process them.")
+    print("Every release is recorded in the audit log.")
+    return 0
+
+
+def _quarantine_forget_all(cfg, db, entries: list[dict], yes: bool) -> int:
+    if not entries:
+        print("\nquarantine is empty; nothing to forget\n")
+        return 0
+
+    archive = Archive(cfg, db)
+    print(f"\nAbout to permanently delete {len(entries)} quarantined recording(s), "
+          "their index entries, and every derived trace:\n")
+    for entry in entries:
+        targets = archive.plan_forget(entry["id"])
+        print(f"  {entry['id']}  {entry['source']}  ({len(targets)} file(s))")
+    print("\nThe audit log keeps a record that each deletion happened. Nothing else survives.")
+
+    if not yes and not _confirm(
+        f"\nType {_FORGET_ALL_PHRASE} to confirm: ", _FORGET_ALL_PHRASE,
+    ):
+        return 1
+
+    removed_total, failures_total = 0, []
+    for entry in entries:
+        removed, failures = archive.forget(entry["id"])
+        removed_total += removed
+        failures_total.extend(failures)
+
+    print(f"\ndeleted {removed_total} file(s) across {len(entries)} recording(s)")
+    for failure in failures_total:
+        print(f"  {failure}")
+    return 1 if failures_total else 0
+
+
+def cmd_quarantine(args) -> int:
+    """
+    Triage the quarantine folder as a whole.
+
+    The default is the read-only listing; the two bulk verbs sit behind the
+    same typed-confirmation discipline as `forget`, and --release-all excludes
+    explicit refusals unconditionally.
+    """
+    cfg = _load(args)
+    db = Database(cfg.path("database"))
+    try:
+        entries = _quarantine_entries(cfg, db)
+        if args.release_all:
+            return _quarantine_release_all(cfg, db, entries, yes=args.yes)
+        if args.forget_all:
+            return _quarantine_forget_all(cfg, db, entries, yes=args.yes)
+        return _quarantine_list(cfg, entries)
     finally:
         db.close()
 
@@ -1635,6 +1916,16 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("recording_id")
     p.add_argument("--yes", action="store_true", help="skip the confirmation prompt")
     p.set_defaults(func=cmd_release)
+
+    p = sub.add_parser("quarantine",
+                       help="triage everything in quarantine: list, bulk release, bulk forget")
+    verbs = p.add_mutually_exclusive_group()
+    verbs.add_argument("--release-all", action="store_true",
+                       help="release everything EXCEPT explicit refusals back to the inbox")
+    verbs.add_argument("--forget-all", action="store_true",
+                       help="permanently delete every quarantined recording and its traces")
+    p.add_argument("--yes", action="store_true", help="skip the confirmation prompt")
+    p.set_defaults(func=cmd_quarantine)
 
     p = sub.add_parser("retention", help="show or execute the retention sweep")
     p.add_argument("--execute", action="store_true", help="actually delete (default is dry run)")

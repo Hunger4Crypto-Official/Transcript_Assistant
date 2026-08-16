@@ -573,6 +573,17 @@ ROUTES: dict[str, list[Check]] = {
         c("review", "--reaffirm", "father", stdin="YES\n", contains="recorded"),
         c("review", "--reaffirm", "insurance_agent", expect=(1,)),
     ],
+    # Triage reads the same folder `release` consumes, so it runs first (see
+    # ROUTE_ORDER). The two bulk verbs are exercised up to their confirmation
+    # prompt: with stdin closed there is nobody to type the phrase, and
+    # declining IS the behaviour under test. Running --release-all --yes here
+    # would consume the fixture the release route needs, and --forget-all --yes
+    # would destroy what everything after it reads.
+    "quarantine": [
+        c("quarantine", contains="in quarantine", quick=True),
+        c("quarantine", "--release-all", expect=(1,), contains="nothing was changed"),
+        c("quarantine", "--forget-all", expect=(1,), contains="nothing was changed"),
+    ],
     "release": [
         c("release", "{held}", "--yes", contains="released", quick=True),
         c("release", "rec_does_not_exist", "--yes", expect=(1,)),
@@ -678,7 +689,7 @@ ROUTE_ORDER = (
     "doctor", "run", "status", "profiles", "voices", "memory", "digest", "search", "open",
     "verify", "ask", "export", "audit", "followups", "review", "backup", "restore",
     "speakers list", "speakers enroll",
-    "speakers identify", "speakers forget", "release", "watch", "new-profile",
+    "speakers identify", "speakers forget", "quarantine", "release", "watch", "new-profile",
     "retention", "forget",
 )
 

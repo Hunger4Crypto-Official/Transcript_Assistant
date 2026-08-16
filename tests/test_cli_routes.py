@@ -28,7 +28,7 @@ from plaud_bridge.db import Database
 # check has something to compare the parser against.
 COVERED = {
     "doctor", "run", "watch", "digest", "status", "search", "verify", "forget",
-    "export", "open", "audit", "release", "retention", "profiles",
+    "export", "open", "audit", "release", "quarantine", "retention", "profiles",
     "new-profile", "voices", "review", "speakers", "followups", "ask",
     "memory", "backup", "restore",
 }
@@ -108,6 +108,7 @@ READ_ONLY = [
     ("search", "mortgage", "--content", "--per-recording", "1"),
     ("search", "anything", "--profile", "insurance_agent", "--days", "30", "--limit", "5"),
     ("retention",),
+    ("quarantine",),
     ("doctor",),
     ("doctor", "--offline"),
 ]
