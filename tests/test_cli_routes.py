@@ -30,7 +30,7 @@ COVERED = {
     "doctor", "run", "watch", "digest", "status", "search", "verify", "forget",
     "export", "open", "audit", "release", "retention", "profiles",
     "new-profile", "voices", "review", "speakers", "followups", "ask",
-    "memory",
+    "memory", "backup", "restore",
 }
 
 
@@ -219,6 +219,25 @@ def test_retention_dry_run_deletes_nothing(sandbox):
 
 def test_retention_execute_needs_confirmation(sandbox, monkeypatch):
     assert cli(sandbox, "retention", "--execute", "--yes") == 0
+
+
+def test_backup_writes_one_file_and_restore_guards_existing_data(sandbox, tmp_path):
+    """
+    The route surface only; what backup and restore actually guarantee is
+    pinned down in tests/test_backup.py.
+    """
+    out = tmp_path / "cli-route.pbb"
+    assert cli(sandbox, "backup", "--out", str(out)) == 0
+    assert out.is_file() and out.stat().st_size > 0
+    # Data is already in place, so a bare restore must refuse...
+    assert cli(sandbox, "restore", str(out)) == 1
+    # ...and --force must go through, leaving an archive that still verifies.
+    assert cli(sandbox, "restore", str(out), "--force") == 0
+    assert cli(sandbox, "verify") == 0
+
+
+def test_restore_a_missing_file_fails_cleanly(sandbox, tmp_path):
+    assert cli(sandbox, "restore", str(tmp_path / "nope.pbb")) == 1
 
 
 def test_forget_removes_one_recording(sandbox):

@@ -637,6 +637,25 @@ ROUTES: dict[str, list[Check]] = {
           skip="there is nothing to delete without an enrollment, which needs the "
                "embedding weights"),
     ],
+    # A backup is one encrypted file, so writing one for real is cheap enough
+    # to do here. The default output path is the operator's home directory,
+    # which a suite promising to leave the machine alone must never touch, so
+    # every check passes --out.
+    "backup": [
+        c("backup", "--out", "{out}/backup.pbb", contains="wrote",
+          creates="{out}/backup.pbb", quick=True),
+    ],
+    # The route brings its own backup file, so `--only restore` stands alone.
+    # The refusal comes first: this sandbox already holds data, which is
+    # exactly what a careless restore meets, and the answer has to be "no,
+    # unless you say --force".
+    "restore": [
+        c("backup", "--out", "{out}/restore-fixture.pbb", contains="wrote", quick=True),
+        c("restore", "{out}/restore-fixture.pbb", expect=(1,), contains="--force",
+          quick=True),
+        c("restore", "{out}/restore-fixture.pbb", "--force", contains="restored"),
+        c("restore", "{out}/no-such-backup.pbb", expect=(1,)),
+    ],
     "retention": [
         c("retention", quick=True),
         c("retention", "--execute", "--yes"),
@@ -657,7 +676,8 @@ ROUTES: dict[str, list[Check]] = {
 # other route needs what it produces.
 ROUTE_ORDER = (
     "doctor", "run", "status", "profiles", "voices", "memory", "digest", "search", "open",
-    "verify", "ask", "export", "audit", "followups", "review", "speakers list", "speakers enroll",
+    "verify", "ask", "export", "audit", "followups", "review", "backup", "restore",
+    "speakers list", "speakers enroll",
     "speakers identify", "speakers forget", "release", "watch", "new-profile",
     "retention", "forget",
 )
