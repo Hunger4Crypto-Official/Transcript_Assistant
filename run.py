@@ -14,6 +14,8 @@ Plaud Bridge, without installing anything.
     python run.py ask "what did I promise Marcus?"     answer it, with citations
     python run.py open <recording_id>           decrypt and print an artifact
     python run.py verify                        confirm every artifact still opens
+    python run.py backup                        everything worth keeping, one encrypted file
+    python run.py restore <file>                bring it all back, passphrase required
     python run.py export                        redacted document for someone else
     python run.py forget <recording_id>         delete one recording, permanently
     python run.py memory                        what it has learned across recordings

@@ -1429,6 +1429,70 @@ def cmd_profiles(args) -> int:
     return 0
 
 
+def cmd_backup(args) -> int:
+    """
+    Everything worth keeping, as one encrypted file.
+
+    The vault's honesty about loss cuts both ways: lose the disk and the
+    archive is gone, because nothing in this tool copies anything anywhere.
+    This is the copy. It is a single file precisely so it can sit on an
+    external drive or in a cloud folder -- and it is encrypted with the vault's
+    own cipher precisely because that folder is not this machine.
+    """
+    from .backup import BackupError, create_backup, default_backup_path
+
+    cfg = _load(args)
+    out = Path(args.out) if args.out else default_backup_path()
+    try:
+        report = create_backup(cfg, Path(args.config), out)
+    except (BackupError, VaultError) as exc:
+        print(f"\n{exc}\n", file=sys.stderr)
+        return 1
+
+    print("\nBacked up, encrypted:")
+    for name, count in report.counts.items():
+        print(f"  {name:12s} {count} file(s)")
+    if report.skipped:
+        print(f"  nothing to include from: {', '.join(report.skipped)}")
+    print("  (data/inbox and data/work are transient and are left out)")
+    print(f"\nwrote {report.path} ({report.size_bytes:,} bytes)")
+    print("\nRestoring needs the passphrase in PLAUD_BRIDGE_PASSPHRASE. It is not")
+    print("stored in this file or anywhere else. Lose the passphrase and this")
+    print("backup is unreadable noise -- keep them apart, but keep them both.")
+    return 0
+
+
+def cmd_restore(args) -> int:
+    """
+    Bring the archive back from a backup file.
+
+    All-or-nothing on purpose: the bundle is decrypted and checked in a temp
+    directory first, so a wrong passphrase or a tampered file is the vault's
+    honest error and an untouched data directory, never a half-restored one.
+    """
+    from .backup import BackupError, restore_backup
+
+    cfg = _load(args)
+    try:
+        report = restore_backup(cfg, Path(args.config), Path(args.file), force=args.force)
+    except (BackupError, VaultError) as exc:
+        print(f"\n{exc}\n", file=sys.stderr)
+        return 1
+
+    print("\nrestored: " + ", ".join(
+        f"{name} ({count} file(s))" for name, count in report.restored.items()
+    ))
+    if report.replaced:
+        print("\nreplaced with the backup's copy (the previous versions are gone):")
+        for path in report.replaced:
+            print(f"  {path}")
+    if report.config_skipped:
+        print("\nThe config directory was left as it is; the backup's copy is only")
+        print("restored with --force, so a tuned profile is never silently undone.")
+    print("\nRun `python run.py verify` to confirm every artifact still opens.")
+    return 0
+
+
 # =========================================================================
 def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(
@@ -1634,6 +1698,18 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--reaffirm", default=None, metavar="PROFILE",
                    help="record a standing-consent reaffirmation for a profile")
     p.set_defaults(func=cmd_review)
+
+    p = sub.add_parser("backup", help="everything worth keeping, as one encrypted file")
+    p.add_argument("--out", default=None,
+                   help="where to write the .pbb file "
+                        "(default: plaud-backup-<timestamp>.pbb in your home directory)")
+    p.set_defaults(func=cmd_backup)
+
+    p = sub.add_parser("restore", help="bring the archive back from a backup file")
+    p.add_argument("file", help="a .pbb file written by `backup`")
+    p.add_argument("--force", action="store_true",
+                   help="replace data already in place, including the config directory")
+    p.set_defaults(func=cmd_restore)
 
     return ap
 
