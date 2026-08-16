@@ -7,6 +7,6 @@ UI the packaged .exe opens in a browser. Nothing here changes how a recording is
 processed -- it is a friendlier front door onto the same engine `run.py` uses.
 """
 
-from .controller import AppController, Brain, PreflightItem
+from .controller import AppController, Brain, LocalLLMStatus, PreflightItem, probe_local_llm
 
-__all__ = ["AppController", "Brain", "PreflightItem"]
+__all__ = ["AppController", "Brain", "LocalLLMStatus", "PreflightItem", "probe_local_llm"]

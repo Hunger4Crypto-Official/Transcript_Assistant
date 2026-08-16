@@ -23,9 +23,12 @@ the encrypted vault -- and those must have exactly one implementation.
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import sys
+import urllib.error
+import urllib.request
 from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum
@@ -58,6 +61,78 @@ _BRAIN_PROVIDERS: dict[Brain, list[str]] = {
 
 PASSPHRASE_ENV = "PLAUD_BRIDGE_PASSPHRASE"
 GROQ_KEY_ENV = "GROQ_API_KEY"
+
+
+class LocalLLMStatus(Enum):
+    """What a probe of the local model server actually found."""
+
+    NOT_RUNNING = "not_running"     # nothing answering at the configured port
+    MODEL_MISSING = "model_missing"  # server up, configured model not pulled
+    READY = "ready"                  # server up and the model is there
+
+
+def _same_model(configured: str, listed: str) -> bool:
+    """
+    Ollama's `:latest` is implicit: `ollama pull llama3` lists as
+    `llama3:latest`, so a person who configured the bare name has the model and
+    must not be told to pull it again. Any other tag difference is a real
+    difference -- `llama3.3` is not `llama3.3:70b`.
+    """
+    def canon(name: str) -> str:
+        return name[:-len(":latest")] if name.endswith(":latest") else name
+
+    return canon(configured) == canon(listed)
+
+
+def probe_local_llm(base_url: str, model: str,
+                    timeout: float = 2.0) -> tuple[LocalLLMStatus, str]:
+    """
+    Ask the local model server what is actually true, not what config hopes.
+
+    The provider's own `available()` only reads config -- it cannot tell "Ollama
+    was never installed" from "Ollama is up but the model was never pulled",
+    and those need different fixes typed by a person who may have never used a
+    terminal for anything else. So this makes one real request to the OpenAI-
+    compatible model list (`GET <base_url>/models`, which ollama, vLLM and
+    llama.cpp all serve) and turns the answer into the exact command to run.
+
+    The timeout is short on purpose: this runs inside the preflight a window is
+    waiting on, and a dead route must come back as a red line in a couple of
+    seconds, never as a hung UI.
+    """
+    url = base_url.rstrip("/") + "/models"
+    try:
+        req = urllib.request.Request(url, method="GET")
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            body = resp.read()
+    except urllib.error.HTTPError:
+        # Something IS listening -- an HTTP error is a server talking. Treat it
+        # as "up, model unconfirmed": the pull command is still the likely fix,
+        # and "install Ollama" would be flatly wrong advice here.
+        body = b""
+    except (TimeoutError, OSError):
+        # Connection refused, no route, or nothing answered in time: for the
+        # person's purposes the server does not exist.
+        return (
+            LocalLLMStatus.NOT_RUNNING,
+            "Ollama is not installed or not running -- install from ollama.com, "
+            f"then run: ollama pull {model}",
+        )
+
+    try:
+        payload = json.loads(body.decode("utf-8"))
+        entries = payload.get("data", []) if isinstance(payload, dict) else []
+        listed = [str(e.get("id", "")) for e in entries if isinstance(e, dict)]
+    except ValueError:
+        listed = []
+
+    if any(_same_model(model, name) for name in listed):
+        return LocalLLMStatus.READY, f"ready: local model '{model}' is loaded"
+    return (
+        LocalLLMStatus.MODEL_MISSING,
+        f"Ollama is running but the model '{model}' is not pulled -- "
+        f"run: ollama pull {model}",
+    )
 
 
 @dataclass
@@ -153,7 +228,16 @@ class AppController:
         """
         self.ensure_installed()
         cfg = Config.load(self.config_dir, root=self.base_dir)
-        cfg._d.setdefault("llm", {})["providers"] = list(_BRAIN_PROVIDERS[brain])
+        llm = cfg._d.setdefault("llm", {})
+        llm["providers"] = list(_BRAIN_PROVIDERS[brain])
+        if brain is Brain.OFFLINE:
+            # The template ships llm.local disabled so the CLI never assumes a
+            # server nobody started. In the app, flipping the switch to Offline
+            # IS that decision -- leaving the flag off would mean the offline
+            # brain only works for someone who hand-edits pipeline.yaml, which
+            # is exactly the person this window exists to spare. In-memory
+            # only, like the providers list above.
+            llm.setdefault("local", {})["enabled"] = True
         # The settle window exists so `watch` does not grab a file another program
         # is still copying. The app copies each picked file to completion before
         # it processes, so here it would only add a few seconds of "nothing is
@@ -200,29 +284,46 @@ class AppController:
         ))
 
         # An analysis brain the chosen mode can actually reach.
-        from ..llm.registry import build_llm_chain
-
-        reachable = []
-        for provider in build_llm_chain(cfg):
-            ok, _ = provider.available()
-            if ok:
-                reachable.append(provider.name)
-        if reachable:
-            items.append(PreflightItem(
-                True, False, f"analysis brain ({brain.value})",
-                "ready: " + ", ".join(reachable),
-            ))
-        elif brain is Brain.OFFLINE:
-            items.append(PreflightItem(
-                False, True, "analysis brain (offline)",
-                "no local model reachable. Install Ollama and pull a model, or "
-                "switch to the free cloud key.",
-            ))
+        if brain is Brain.OFFLINE:
+            # For offline, config alone cannot answer "will this run": the
+            # provider's available() reads config and would call a dead Ollama
+            # "ready". Probe the real server so the red line names the one
+            # command that fixes it, not a generic shrug.
+            base_url = str(cfg.get("llm.local.base_url", "") or "")
+            model = str(cfg.get("llm.local.model", "") or "")
+            if base_url and model:
+                status, detail = probe_local_llm(base_url, model)
+                if status is not LocalLLMStatus.READY:
+                    detail += " Or switch to the free cloud key."
+                items.append(PreflightItem(
+                    status is LocalLLMStatus.READY, True,
+                    "analysis brain (offline)", detail,
+                ))
+            else:
+                items.append(PreflightItem(
+                    False, True, "analysis brain (offline)",
+                    "llm.local in pipeline.yaml is missing base_url or model, "
+                    "so there is nothing to probe. Restore those keys, or "
+                    "switch to the free cloud key.",
+                ))
         else:
-            items.append(PreflightItem(
-                False, True, "analysis brain (cloud)",
-                "no free cloud key set. Paste a Groq key, or switch to offline.",
-            ))
+            from ..llm.registry import build_llm_chain
+
+            reachable = []
+            for provider in build_llm_chain(cfg):
+                ok, _ = provider.available()
+                if ok:
+                    reachable.append(provider.name)
+            if reachable:
+                items.append(PreflightItem(
+                    True, False, f"analysis brain ({brain.value})",
+                    "ready: " + ", ".join(reachable),
+                ))
+            else:
+                items.append(PreflightItem(
+                    False, True, "analysis brain (cloud)",
+                    "no free cloud key set. Paste a Groq key, or switch to offline.",
+                ))
 
         # A passphrase, or the vault refuses to write anything sensitive.
         has_pass = bool(os.environ.get(PASSPHRASE_ENV, "").strip())
