@@ -17,6 +17,10 @@ packaging/icon.ico
 packaging/bin/
 *.spec.bak
 
+# Claude Code session scratch: agent worktrees and local settings live here
+# during a session and are never part of the project.
+.claude/
+
 # Recordings, transcripts, the vault, and the index never go near a remote.
 # The inbox placeholder is tracked so a fresh clone has somewhere to drop files;
 # nothing else under data/ is.
