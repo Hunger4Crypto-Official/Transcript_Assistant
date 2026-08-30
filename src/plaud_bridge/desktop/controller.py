@@ -36,7 +36,6 @@ from pathlib import Path
 
 from ..config import Config
 from ..digest import DigestBuilder, DigestOptions
-from ..digest.html import to_html
 
 
 class Brain(str, Enum):
@@ -391,20 +390,247 @@ class AppController:
 
         Defaults to a long window and work profiles only -- the same default the
         CLI keeps, so a personal recording is not folded into a document meant to
-        be glanced at over someone's shoulder unless it is asked for.
+        be glanced at over someone's shoulder unless it is asked for. Rendered
+        through the builder's own HTML path so the charts come with it.
         """
         from ..db import Database
 
         cfg = self.load_config(Brain.CLOUD)
         db = Database(cfg.path("database"))
         try:
-            markdown = DigestBuilder(cfg, db).render_markdown(
-                DigestOptions(days=days, include_personal=include_personal)
+            html = DigestBuilder(cfg, db).render_html(
+                DigestOptions(days=days, include_personal=include_personal),
+                title="Your digest",
             )
         finally:
             db.close()
-        html = to_html(markdown, title="Your digest")
         out = cfg.path("outbox") / out_name
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text(html, encoding="utf-8")
         return out
+
+    # ---- everything the tabs drive --------------------------------------
+    #
+    # Each of these opens the index, does one read or one narrow write through
+    # the same engine code the CLI uses, and returns plain dicts a page can
+    # render. None of them cache: the app is a viewer over live state, and a
+    # stale list of quarantined recordings is how someone releases the wrong
+    # one. The db handle is opened and closed per call -- SQLite is fine with
+    # that, and it keeps the server free of connection lifetime bugs.
+
+    def _stores(self):
+        """(cfg, db, archive, vault) for one read; caller closes db."""
+        from ..archive import Archive
+        from ..db import Database
+        from ..storage import Vault
+
+        cfg = self.load_config(Brain.CLOUD)
+        db = Database(cfg.path("database"))
+        vault = Vault(cfg.path("vault"))
+        return cfg, db, Archive(cfg, db, vault), vault
+
+    def recent_recordings(self, limit: int = 50) -> list[dict]:
+        """The library view: what is in the archive, newest first."""
+        cfg, db, _archive, _vault = self._stores()
+        try:
+            rows = db.query(limit=limit)
+        finally:
+            db.close()
+        personal = {p.id for p in cfg.profiles.values() if p.exclude_from_combined_export}
+        out = []
+        for row in rows:
+            profile = row["governing_profile"] or "unfiled"
+            out.append({
+                "id": row["id"],
+                "name": row["source_name"],
+                "when": ((row["recorded_at"] or row["ingested_at"] or "")[:16]).replace("T", " "),
+                "minutes": round(float(row["duration_seconds"] or 0) / 60.0, 1),
+                "profile": profile,
+                "personal": profile in personal,
+                "stage": row["stage"],
+                "encrypted": bool(row["encrypted"]),
+            })
+        return out
+
+    def search(self, query: str) -> dict:
+        """
+        Search what was actually said, with the honesty fields intact.
+
+        `unopened` and `truncated` ride along so the page can say "3 recordings
+        could not be opened" instead of quietly presenting a partial search as a
+        complete one -- the same contract the CLI keeps.
+        """
+        _cfg, db, archive, _vault = self._stores()
+        try:
+            result = archive.search_content(query)
+        finally:
+            db.close()
+        return {
+            "matches": [
+                {
+                    "recording_id": m.recording_id, "source": m.source_name,
+                    "when": m.when, "profile": m.profile_id, "personal": m.personal,
+                    "stamp": m.stamp, "speaker": m.speaker, "text": m.text,
+                }
+                for m in result.matches
+            ],
+            "scanned": result.scanned,
+            "total": result.total,
+            "unopened": len(result.unopened),
+            "quarantined": len(result.quarantined),
+            "complete": result.complete,
+        }
+
+    def ask(self, question: str, brain: Brain,
+            include_personal: bool = False) -> dict:
+        """
+        Answer a question from the archive, with citations.
+
+        `ask` never raises for a missing model -- it degrades to ranked excerpts
+        and says so -- which is exactly the behaviour a window wants. The chosen
+        brain narrows the provider chain the same way processing does.
+        """
+        from ..archive import Archive
+        from ..ask import ask as ask_engine
+        from ..db import Database
+
+        cfg = self.load_config(brain)
+        db = Database(cfg.path("database"))
+        try:
+            answer = ask_engine(question, cfg, db, Archive(cfg, db),
+                                include_personal=include_personal)
+        finally:
+            db.close()
+        return {
+            "text": answer.text,
+            "confidence": answer.confidence,
+            "unanswered": answer.unanswered,
+            "degraded": answer.degraded,
+            "note": answer.note,
+            "cost_usd": round(answer.cost_usd, 4),
+            "citations": [
+                {"recording_id": c.recording_id, "stamp": c.stamp,
+                 "quote": c.quote, "source": c.source_name}
+                for c in answer.citations
+            ],
+            "unopened": len(answer.unopened),
+        }
+
+    def followups(self, status: str | None = "open") -> dict:
+        """The worklist: commitments still owed, oldest first."""
+        from ..followups import FollowUpError, collect
+
+        cfg, db, archive, vault = self._stores()
+        try:
+            items = collect(cfg, db, archive, status=status, vault=vault)
+        except FollowUpError as exc:
+            return {"items": [], "error": str(exc)}
+        finally:
+            db.close()
+        return {"items": [
+            {
+                "id": item.id, "short_id": item.short_id, "text": item.text,
+                "profile": item.profile_id, "age_days": item.age_days,
+                "due": item.due, "status": item.status,
+                "counterparty": item.counterparty, "source": item.source_name,
+            }
+            for item in items
+        ], "error": ""}
+
+    def followup_mark(self, followup_id: str, status: str) -> dict:
+        """Mark one follow-up done/dropped/open, through the engine's rules."""
+        from ..followups import FollowUpError, collect, set_status
+
+        cfg, db, archive, vault = self._stores()
+        try:
+            items = collect(cfg, db, archive, vault=vault)
+            match = set_status(cfg, vault, followup_id, status, items=items)
+        except FollowUpError as exc:
+            return {"ok": False, "error": str(exc)}
+        finally:
+            db.close()
+        return {"ok": True, "id": match.id, "status": match.status, "error": ""}
+
+    def quarantine(self) -> list[dict]:
+        """Everything held for review, with the reason distilled and classed."""
+        from ..cli import _quarantine_entries
+
+        cfg, db, _archive, _vault = self._stores()
+        try:
+            entries = _quarantine_entries(cfg, db)
+        finally:
+            db.close()
+        return [
+            {
+                "id": e["id"], "source": e["source"], "when": e["when"],
+                "klass": e["klass"], "reason": e["reason"],
+                "released": e["released"], "has_media": bool(e["media"]),
+            }
+            for e in entries
+        ]
+
+    def quarantine_release(self, recording_id: str) -> dict:
+        """
+        Release one held recording back to the inbox -- unless it is a refusal.
+
+        The CLI lets a refusal be released one at a time behind its own typed
+        confirmation; a button is not that. Someone who said "don't record
+        this" does not get released by a click, so the app refuses outright and
+        points at the deliberate path. Everything else goes through the same
+        release helper the CLI uses, same audit, same actor.
+        """
+        from ..cli import _CLASS_REFUSAL, _quarantine_entries, _release_media
+
+        cfg, db, _archive, _vault = self._stores()
+        try:
+            entry = next((e for e in _quarantine_entries(cfg, db)
+                          if e["id"] == recording_id), None)
+            if entry is None:
+                return {"ok": False, "error": "no such quarantined recording"}
+            if entry["klass"] == _CLASS_REFUSAL:
+                return {"ok": False, "error": (
+                    "a party objected to being recorded. Policy: refusals are "
+                    "not released by a click. If consent truly was obtained, "
+                    f"use the command line: run.py release {recording_id}"
+                )}
+            if not entry["media"]:
+                return {"ok": False, "error": "the quarantine folder has no media to release"}
+            released = _release_media(cfg, db, recording_id,
+                                      detail="released after human review (app)")
+        finally:
+            db.close()
+        return {"ok": True, "released": [p.name for p in released],
+                "note": "back in the inbox; press Process to run it", "error": ""}
+
+    def quarantine_forget(self, recording_id: str) -> dict:
+        """Delete one held recording permanently, through the real forget."""
+        cfg, db, archive, _vault = self._stores()
+        try:
+            payload = db.load(recording_id)
+            qdir = cfg.path("quarantine") / recording_id
+            if payload is None and not qdir.is_dir():
+                return {"ok": False, "error": "no such recording"}
+            removed, failures = archive.forget(recording_id)
+        finally:
+            db.close()
+        if failures:
+            return {"ok": False, "error": "; ".join(failures[:3])}
+        return {"ok": True, "removed": removed, "error": ""}
+
+    def backup(self) -> dict:
+        """One encrypted file with everything worth keeping. Fail-closed."""
+        from ..backup import BackupError, create_backup, default_backup_path
+        from ..storage import VaultError
+
+        cfg = self.load_config(Brain.CLOUD)
+        out = self.base_dir / "backups" / default_backup_path().name
+        out.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            report = create_backup(cfg, self.config_dir, out)
+        except (BackupError, VaultError) as exc:
+            return {"ok": False, "error": str(exc), "path": ""}
+        return {
+            "ok": True, "path": str(out), "error": "",
+            "counts": dict(report.counts),
+            "size_mb": round(out.stat().st_size / 1_048_576, 1) if out.exists() else 0.0,
+        }

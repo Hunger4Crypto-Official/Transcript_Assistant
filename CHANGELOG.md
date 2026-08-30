@@ -5,10 +5,31 @@
 ### A window instead of a terminal
 
 Double-click and use it from a browser: `desktop_app.py` (and the packaged
-Windows build under `packaging/`) opens a small local page — passphrase, a
-brain switch, drop your recordings, Process, Open digest. It is a thin skin
-over the same pipeline; the locality locks, consent gate, and vault keep their
-single implementation.
+Windows build under `packaging/`) opens a local app that is a thin skin over
+the same pipeline; the locality locks, consent gate, and vault keep their
+single implementation. Seven tabs:
+
+- **Process** — passphrase, the Offline/free-cloud-key brain switch, readiness
+  checks, drop recordings, watch the run. A run that holds recordings points
+  you at the Held tab.
+- **Library** — every recording with profile, minutes, and encrypted/held
+  badges, plus digest controls: a time window and an include-personal toggle
+  (with the over-someone's-shoulder warning), opening the charts digest.
+- **Search** — what was actually said, with the honesty line intact: it says
+  how many recordings were searched and how many could not be opened, so a
+  partial search never presents as a complete one.
+- **Ask** — a question answered with citations; with no model reachable it
+  says plainly that it is showing ranked excerpts, never a fabricated answer.
+- **Follow-ups** — the commitments worklist, oldest first, with Done/Drop/
+  Reopen persisting through the engine's own status rules.
+- **Held** — quarantine triage with the reason classed and badged. Releasing
+  is a human affirmation; a recording where someone *objected* has no release
+  button at all and says why — a refusal is not a click. Forget requires
+  typing the word and routes through the real `forget`.
+- **Tools** — one-click encrypted backup, and the app's version.
+
+Everything the page renders is escaped before it touches the DOM — transcript
+text is untrusted content even in your own browser.
 
 - Loopback-only, token-guarded, Host-checked. Another machine — or a hostile
   website you happen to have open — cannot drive it.
