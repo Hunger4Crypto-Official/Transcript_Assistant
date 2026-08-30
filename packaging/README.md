@@ -32,6 +32,26 @@ Your recordings, transcripts, and the encrypted vault live in a per-user folder
 (`%LOCALAPPDATA%\PlaudBridge`), not inside the app folder, so updating the app
 never touches your data.
 
+## Use it from your phone
+
+Start the app in **phone mode** and your phone becomes a second screen for it —
+same tabs, same engine, nothing in any cloud:
+
+1. Make a shortcut to `PlaudBridge.exe` and add ` --phone` to its Target (or set
+   the environment variable `PLAUD_BRIDGE_PHONE=1`). Windows Firewall will ask
+   once — allow it on **Private networks only**.
+2. The black window (and the Tools tab) shows an address like
+   `http://192.168.1.23:54321/?token=...`. Open it on a phone connected to the
+   **same Wi-Fi**.
+3. In the phone's browser menu, choose **Add to Home Screen**. It installs like
+   an app, icon and all.
+
+Honest limits: the link carries the session's key and traffic on your Wi-Fi is
+not encrypted, so home network only — never public Wi-Fi. The address changes
+each launch (new port, new key), so re-open it from the Tools tab after a
+restart. Without `--phone`, the app answers your own machine only, exactly as
+before.
+
 ## Building it locally instead (optional)
 
 On a Windows machine with Python installed:

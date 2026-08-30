@@ -97,7 +97,25 @@ class AppServer:
         self.job = _Job()
         self._pending_update = None
         self._httpd = None
+        # Phone mode: names beyond loopback the Host check may accept, and the
+        # URL a phone on the same network opens. Both empty until a launcher
+        # explicitly turns phone mode on -- reachable-from-the-network is never
+        # a default for a tool holding recordings.
+        self._extra_hosts: set[str] = set()
+        self.lan_url = ""
         self.controller.ensure_installed()
+
+    def enable_phone(self, lan_ip: str, port: int) -> str:
+        """
+        Let this machine's Wi-Fi address reach the app, and say where.
+
+        The token stays mandatory on every request -- phone mode widens WHERE
+        the app answers, never WHO it answers. The returned URL carries the
+        token, so opening it on the phone is the authentication.
+        """
+        self._extra_hosts.add(lan_ip)
+        self.lan_url = f"http://{lan_ip}:{port}/?token={self.token}"
+        return self.lan_url
 
     # ---- actions the handler calls -------------------------------------
     def preflight(self, brain: Brain) -> list[dict]:
@@ -199,6 +217,13 @@ class AppServer:
                 host_header = (self.headers.get("Host") or "").split(":")[0]
                 return host_header in ("127.0.0.1", "localhost", "")
 
+            def _host_allowed(self) -> bool:
+                """Loopback always; the LAN address only when phone mode is on."""
+                if self._loopback_host():
+                    return True
+                host_header = (self.headers.get("Host") or "").split(":")[0]
+                return host_header in app._extra_hosts
+
             def _authed(self) -> bool:
                 token = self.headers.get("X-Token") or parse_qs(
                     urlparse(self.path).query
@@ -219,7 +244,7 @@ class AppServer:
                 self._send(code, json.dumps(obj).encode("utf-8"), "application/json")
 
             def _guard(self) -> bool:
-                if not self._loopback_host():
+                if not self._host_allowed():
                     self._send(403, b"forbidden", "text/plain")
                     return False
                 if not self._authed():
@@ -234,11 +259,46 @@ class AppServer:
             def do_GET(self):  # noqa: N802
                 route = urlparse(self.path).path
                 if route in ("/", "/index.html"):
-                    if not self._loopback_host():
+                    if not self._host_allowed():
+                        self._send(403, b"forbidden", "text/plain")
+                        return
+                    # The page embeds the token, so WHO gets the page is the
+                    # whole game. On loopback, serving it bare is fine -- only
+                    # local processes can connect. Over the LAN it must be
+                    # earned: the phone URL carries the token, and a bare GET
+                    # from someone else on the Wi-Fi gets nothing.
+                    if not self._loopback_host() and not self._authed():
                         self._send(403, b"forbidden", "text/plain")
                         return
                     self._send(200, _PAGE.replace("__TOKEN__", app.token).encode("utf-8"),
                                "text/html; charset=utf-8")
+                    return
+                if route == "/manifest.webmanifest":
+                    # What lets a phone's "Add to Home Screen" install this as
+                    # an app. Token-guarded like everything else; the page
+                    # declares the link with its token attached.
+                    if not self._guard():
+                        return
+                    icon = (
+                        "data:image/svg+xml,"
+                        "%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E"
+                        "%3Crect width='100' height='100' rx='20' fill='%232b6cb0'/%3E"
+                        "%3Cg fill='%23fff'%3E%3Crect x='24' y='38' width='9' height='24' rx='4'/%3E"
+                        "%3Crect x='38' y='28' width='9' height='44' rx='4'/%3E"
+                        "%3Crect x='52' y='42' width='9' height='16' rx='4'/%3E"
+                        "%3Crect x='66' y='32' width='9' height='36' rx='4'/%3E%3C/g%3E%3C/svg%3E"
+                    )
+                    manifest = {
+                        "name": "Plaud Bridge",
+                        "short_name": "Plaud",
+                        "start_url": f"/?token={app.token}",
+                        "display": "standalone",
+                        "background_color": "#161618",
+                        "theme_color": "#2b6cb0",
+                        "icons": [{"src": icon, "sizes": "any", "type": "image/svg+xml"}],
+                    }
+                    self._send(200, json.dumps(manifest).encode("utf-8"),
+                               "application/manifest+json")
                     return
                 if not self._guard():
                     return
@@ -247,7 +307,8 @@ class AppServer:
                     from .. import __version__
 
                     self._json(200, {"preflight": app.preflight(brain),
-                                     "job": app.job.snapshot(), "version": __version__})
+                                     "job": app.job.snapshot(), "version": __version__,
+                                     "lan_url": app.lan_url})
                 elif route == "/api/status":
                     self._json(200, app.job.snapshot())
                 elif route == "/api/digest":
@@ -375,6 +436,9 @@ _PAGE = """<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Plaud Bridge</title>
+<meta name="theme-color" content="#2b6cb0">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
 <style>
   :root { color-scheme: light dark; --bg:#fff; --fg:#1c1c1e; --muted:#6b6b70;
     --line:#e3e3e8; --accent:#2b6cb0; --ok:#1a7f37; --bad:#c0392b; --warn:#b7791f; --card:#f7f7f9; }
@@ -392,7 +456,7 @@ _PAGE = """<!doctype html>
     padding:9px 13px; border-radius:9px 9px 0 0; border-bottom:2px solid transparent; }
   .tabs button.sel { color:var(--fg); border-bottom-color:var(--accent); }
   .card { background:var(--card); border:1px solid var(--line); border-radius:12px;
-    padding:16px 18px; margin:14px 0; }
+    padding:16px 18px; margin:14px 0; overflow-x:auto; }
   label { display:block; font-weight:600; margin:.6rem 0 .3rem; }
   input[type=text], input[type=password], textarea, select {
     width:100%; padding:9px 11px; font-size:15px; font-family:inherit;
@@ -598,6 +662,23 @@ _PAGE = """<!doctype html>
       </div>
     </div>
     <div class="card">
+      <label>Use it on your phone</label>
+      <div id="phoneoff" class="detail">Phone mode is off. Start the app with
+        <b>--phone</b> (or set PLAUD_BRIDGE_PHONE=1) and this card shows the address to open
+        on a phone connected to the same Wi-Fi. Once open, use your browser's
+        &ldquo;Add to Home Screen&rdquo; and it installs like an app.</div>
+      <div id="phoneon" style="display:none">
+        <div class="detail">Open this on your phone (same Wi-Fi), then &ldquo;Add to Home Screen&rdquo;:</div>
+        <div class="row" style="margin-top:6px">
+          <input id="phoneurl" type="text" readonly style="flex:1">
+          <button class="small" onclick="navigator.clipboard&&navigator.clipboard.writeText($('phoneurl').value)">Copy</button>
+        </div>
+        <div class="detail" style="margin-top:6px">Home network only: the link carries this
+        session's key, and traffic on your Wi-Fi is not encrypted. Never use phone mode on
+        public Wi-Fi. The address changes each time the app starts.</div>
+      </div>
+    </div>
+    <div class="card">
       <label>About</label>
       <div class="detail" id="aboutver">version: ...</div>
       <div class="detail">Updates are offered on this page when a new release exists; nothing
@@ -643,7 +724,9 @@ function renderChecks(items){
 async function refresh(){
   const j=await GET("/api/state?brain="+BRAIN);
   renderChecks(j.preflight);
-  if(j.version) $("aboutver").textContent="version: "+j.version;}
+  if(j.version) $("aboutver").textContent="version: "+j.version;
+  if(j.lan_url){$("phoneoff").style.display="none";$("phoneon").style.display="block";
+    $("phoneurl").value=j.lan_url;}}
 
 /* ---- process ---- */
 $("files").addEventListener("change",e=>{
@@ -799,6 +882,8 @@ async function applyUpdate(){
     if(j.applied){msg.textContent=j.message+" You can close this tab; the app reopens itself.";}
     else{msg.textContent="Could not update: "+(j.error||"unknown"); btn.disabled=false;}
   }catch(e){msg.textContent="Could not update: "+e; btn.disabled=false;}}
+const MF=document.createElement("link"); MF.rel="manifest";
+MF.href="/manifest.webmanifest?token="+TOKEN; document.head.appendChild(MF);
 refresh(); checkUpdate();
 </script>
 </body></html>"""

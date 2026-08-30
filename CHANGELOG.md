@@ -31,6 +31,14 @@ single implementation. Seven tabs:
 Everything the page renders is escaped before it touches the DOM — transcript
 text is untrusted content even in your own browser.
 
+**Phone mode** (`--phone`, or `PLAUD_BRIDGE_PHONE=1`): the app also answers on
+your Wi-Fi address, so a phone on the same network opens the same tabs and
+"Add to Home Screen" installs it like an app — no cloud involved. Opt-in every
+launch, never a default. The token stays mandatory on every request, and over
+the network that includes the page itself, so nobody on the Wi-Fi can be handed
+the key by asking; a served manifest makes the install real. Home network only:
+the link carries the session's key and Wi-Fi traffic is unencrypted.
+
 - Loopback-only, token-guarded, Host-checked. Another machine — or a hostile
   website you happen to have open — cannot drive it.
 - The Offline brain diagnoses itself: it probes the local model server and

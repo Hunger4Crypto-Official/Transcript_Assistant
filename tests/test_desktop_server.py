@@ -157,3 +157,84 @@ def test_launcher_build_stands_up_without_blocking(tmp_path, monkeypatch):
     finally:
         httpd.shutdown()
         httpd.server_close()
+
+
+# =========================================================================
+# Phone mode
+# =========================================================================
+def test_phone_mode_admits_the_lan_host_with_the_token(tmp_path, monkeypatch):
+    """
+    Phone mode widens WHERE the app answers, never WHO: the LAN Host header is
+    accepted, but only with the token -- including for the page itself, which
+    embeds the token and must therefore never be served bare over the network.
+    """
+    monkeypatch.setenv("PLAUD_BRIDGE_PASSPHRASE", "a-long-enough-desktop-passphrase")
+    controller = AppController(base_dir=tmp_path / "home", template_dir=ROOT / "config")
+    app = AppServer(controller)
+    httpd = app.make_server("127.0.0.1", 0)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    port = httpd.server_address[1]
+    base = f"http://127.0.0.1:{port}"
+    lan_url = app.enable_phone("192.168.1.50", port)
+    try:
+        assert app.token in lan_url and "192.168.1.50" in lan_url
+
+        # The page over the LAN host WITHOUT the token: refused. This is the
+        # line that keeps the token from being handed to anyone on the Wi-Fi.
+        status, _ = _req(base, "/", host=f"192.168.1.50:{port}")
+        assert status == 403
+
+        # With the token (the URL the phone opens): served.
+        status, body = _req(base, "/?token=" + app.token, host=f"192.168.1.50:{port}")
+        assert status == 200 and app.token.encode() in body
+
+        # API over the LAN host follows the same rule.
+        status, _ = _req(base, "/api/state?brain=cloud", host=f"192.168.1.50:{port}")
+        assert status == 403
+        status, _ = _req(base, "/api/state?brain=cloud", token=app.token,
+                         host=f"192.168.1.50:{port}")
+        assert status == 200
+
+        # And a host nobody enabled is still refused outright.
+        status, _ = _req(base, "/?token=" + app.token, host="evil.example.com")
+        assert status == 403
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+
+
+def test_without_phone_mode_the_lan_host_stays_refused(server):
+    base, token = server
+    status, _ = _req(base, "/?token=" + token, host="192.168.1.50")
+    assert status == 403, "a LAN host was accepted without phone mode being enabled"
+
+
+def test_the_manifest_installs_the_app_and_is_token_guarded(server):
+    base, token = server
+    status, _ = _req(base, "/manifest.webmanifest")
+    assert status == 403
+    status, body = _req(base, "/manifest.webmanifest", token=token)
+    assert status == 200
+    manifest = json.loads(body)
+    assert manifest["name"] == "Plaud Bridge" and manifest["display"] == "standalone"
+    assert token in manifest["start_url"]
+
+
+def test_launcher_phone_mode_publishes_a_lan_url(tmp_path, monkeypatch):
+    monkeypatch.setenv("PLAUD_BRIDGE_PASSPHRASE", "a-long-enough-desktop-passphrase")
+    from plaud_bridge.desktop import launch
+
+    app, httpd, url = launch.build(base_dir=tmp_path / "home", phone=True)
+    try:
+        assert url.startswith("http://127.0.0.1:")
+        # In a sandbox with no network the LAN address may degrade to loopback,
+        # in which case lan_url stays empty by design; when it is set it must
+        # carry the token and a non-loopback address.
+        if app.lan_url:
+            assert app.token in app.lan_url
+            assert "127.0.0.1" not in app.lan_url
+    finally:
+        # No shutdown(): serve_forever never ran here, and shutdown() blocks
+        # forever waiting for a loop that does not exist. Closing the socket
+        # is the whole cleanup.
+        httpd.server_close()
