@@ -316,6 +316,22 @@ class Vault:
                     "truncated. Refusing to hand back a partial recording."
                 )
 
+    def iter_plaintext(self, path: Path, recording_id: str = ""):
+        """
+        Yield an artifact's plaintext chunk by chunk, writing nothing anywhere.
+
+        This is the public face of `_stream_plaintext`, and it exists for the
+        media server: playing a recording in the app means piping decrypted
+        bytes straight into an HTTP response, and every prior reader either
+        wrote a file (`read_stream`) or discarded the bytes (`verify_stream`).
+        It handles both on-disk formats -- the chunked PBS1 stream and the
+        one-shot PBV1 blob -- because the caller found a path in the index and
+        should not have to care which writer produced it. All of the stream
+        format's honesty guarantees apply: a reordered, truncated, or tampered
+        file raises VaultError rather than yielding a quietly shorter file.
+        """
+        yield from self._stream_plaintext(Path(path), recording_id)
+
     def read_stream(self, path: Path, dest: Path, recording_id: str = "") -> Path:
         """Decrypt a streamed artifact to a file, a chunk at a time."""
         path, dest = Path(path), Path(dest)
