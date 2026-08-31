@@ -20,6 +20,7 @@ Plaud Bridge, without installing anything.
     python run.py export                        redacted document for someone else
     python run.py forget <recording_id>         delete one recording, permanently
     python run.py memory                        what it has learned across recordings
+    python run.py people                        everyone it has heard, by name
     python run.py audit                         read the compliance audit log
     python run.py release <recording_id>        release a quarantined recording
     python run.py quarantine                    triage everything in quarantine at once

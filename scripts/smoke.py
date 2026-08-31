@@ -577,6 +577,22 @@ ROUTES: dict[str, list[Check]] = {
         c("insights", "--recording", "{rec}", contains="Speaker"),
         c("insights", "--recording", "rec_does_not_exist", expect=(1,)),
     ],
+    # The roster reads what the run already stored, so by this point Dana and
+    # the owner are both in it. The unknown-name check matters as much as the
+    # happy path: names come from speaker labels, and a typo that printed an
+    # empty dossier would read as "this person was never heard".
+    "people": [
+        c("people", contains="People", quick=True),
+        c("people", "--days", "30"),
+        c("people", "--include-personal"),
+        c("people", "--title", "Everyone"),
+        c("people", "--name", "Dana", contains="Dana"),
+        c("people", "--name", "Nobody Like This", expect=(1,),
+          contains="nobody here is called"),
+        c("people", "--out", "{out}/people.md", creates="{out}/people.md"),
+        c("people", "--format", "html", "--out", "{out}/people.html",
+          creates="{out}/people.html"),
+    ],
     "review": [
         c("review", quick=True),
         c("review", "--days", "7"),
@@ -699,7 +715,7 @@ ROUTES: dict[str, list[Check]] = {
 # other route needs what it produces.
 ROUTE_ORDER = (
     "doctor", "run", "status", "profiles", "voices", "memory", "digest", "search", "open",
-    "verify", "ask", "export", "audit", "followups", "insights", "review",
+    "verify", "ask", "export", "audit", "followups", "insights", "people", "review",
     "backup", "restore",
     "speakers list", "speakers enroll",
     "speakers identify", "speakers forget", "quarantine", "release", "watch", "new-profile",
