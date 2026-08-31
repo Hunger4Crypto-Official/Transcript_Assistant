@@ -565,6 +565,18 @@ ROUTES: dict[str, list[Check]] = {
         c("followups", "--drop", "{followup}", contains="is now dropped"),
         c("followups", "--done", "fu_000000000000", expect=(1,)),
     ],
+    # Insights are arithmetic over the same stored segments `open` prints, so
+    # every figure is checkable by hand. An unknown recording exits 1 the way
+    # `open`'s does; everything else must be exit 0 -- this fixture archive
+    # opens completely, so the "incomplete numbers" exit 2 would be a bug here.
+    "insights": [
+        c("insights", contains="Insights", quick=True),
+        c("insights", "--days", "30"),
+        c("insights", "--profile", "insurance_agent"),
+        c("insights", "--include-personal"),
+        c("insights", "--recording", "{rec}", contains="Speaker"),
+        c("insights", "--recording", "rec_does_not_exist", expect=(1,)),
+    ],
     "review": [
         c("review", quick=True),
         c("review", "--days", "7"),
@@ -687,7 +699,8 @@ ROUTES: dict[str, list[Check]] = {
 # other route needs what it produces.
 ROUTE_ORDER = (
     "doctor", "run", "status", "profiles", "voices", "memory", "digest", "search", "open",
-    "verify", "ask", "export", "audit", "followups", "review", "backup", "restore",
+    "verify", "ask", "export", "audit", "followups", "insights", "review",
+    "backup", "restore",
     "speakers list", "speakers enroll",
     "speakers identify", "speakers forget", "quarantine", "release", "watch", "new-profile",
     "retention", "forget",

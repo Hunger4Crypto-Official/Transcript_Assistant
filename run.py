@@ -9,6 +9,7 @@ Plaud Bridge, without installing anything.
     python run.py digest --format html          self-contained page, prints cleanly
     python run.py review                        what the review cadence says is due
     python run.py followups                     commitments still open, oldest first
+    python run.py insights                      how you talk: share, pace, questions
     python run.py status                        index summary
     python run.py search "own occupation" --content    search what was actually said
     python run.py ask "what did I promise Marcus?"     answer it, with citations

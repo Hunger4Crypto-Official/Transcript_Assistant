@@ -9,6 +9,7 @@ Plaud Bridge command line.
     plaud-bridge digest --format html          self-contained page, prints cleanly
     plaud-bridge review                        what the review cadence says is due
     plaud-bridge followups                     commitments still open, oldest first
+    plaud-bridge insights                      how you talk: share, pace, questions
     plaud-bridge status                        index summary
     plaud-bridge search "own occupation" --content    search what was actually said
     plaud-bridge ask "what did I promise Marcus?"      answer it, with citations
@@ -46,6 +47,8 @@ from .config import Config, ConfigError
 from .db import Database
 from .digest import DigestBuilder, DigestOptions, fmt_value, to_html
 from .followups import FollowUpError, collect, draft, render, set_status
+from .insights import InsightsError, recording_metrics, render_recording, render_trend
+from .insights import trend as insights_trend
 from .logging_setup import setup
 from .memory import MemoryStore, carry_forward_brief, render_ledger
 from .models import format_stamp
@@ -410,6 +413,37 @@ def cmd_followups(args) -> int:
         else:
             print(body)
         return 0
+    finally:
+        db.close()
+
+
+def cmd_insights(args) -> int:
+    """
+    Conversation metrics, derived on demand from the stored segments.
+
+    No model and no storage: everything printed here is arithmetic the reader
+    can check against `open <id>`, and there is no cache for `forget` to miss.
+    Exit 2 means the numbers are honest but incomplete -- some recordings
+    would not open -- which is the same convention `search --content` uses.
+    """
+    cfg = _load(args)
+    db = Database(cfg.path("database"))
+    try:
+        archive = Archive(cfg, db)
+        try:
+            if args.recording:
+                print(render_recording(recording_metrics(cfg, db, archive, args.recording)))
+                return 0
+            report = insights_trend(
+                cfg, db, archive,
+                profile=args.profile, days=args.days,
+                include_personal=args.include_personal,
+            )
+        except InsightsError as exc:
+            print(f"\n{exc}\n", file=sys.stderr)
+            return 2 if exc.unopened else 1
+        print(render_trend(report))
+        return 2 if report.unopened else 0
     finally:
         db.close()
 
@@ -1831,6 +1865,17 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--out", default=None, help="write to a file instead of stdout")
     p.add_argument("--title", default=None)
     p.set_defaults(func=cmd_followups)
+
+    p = sub.add_parser("insights",
+                       help="how you talk: share, pace, questions, monologues")
+    p.add_argument("--recording", default=None, metavar="ID",
+                   help="one recording's breakdown per speaker")
+    p.add_argument("--days", type=int, default=30, help="lookback window (default 30)")
+    p.add_argument("--profile", default=None, help="filter to one profile id")
+    p.add_argument("--include-personal", action="store_true",
+                   help="count father/husband recordings too; they are left out "
+                        "by default, the same rule as the digest")
+    p.set_defaults(func=cmd_insights)
 
     p = sub.add_parser("status", help="index summary")
     p.set_defaults(func=cmd_status)
