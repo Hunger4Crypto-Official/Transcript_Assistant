@@ -469,6 +469,17 @@ ROUTES: dict[str, list[Check]] = {
         c("digest", "--format", "html", "--out", "{out}/digest.html",
           creates="{out}/digest.html"),
     ],
+    # The brief is a synthesis across the whole window. The stub answers the
+    # shape it is shown, so the narrated path runs for real here; the assembled
+    # fallback (no model at all) is pinned down by tests/test_brief.py.
+    "brief": [
+        c("brief", contains="Brief", quick=True),
+        c("brief", "--days", "30"),
+        c("brief", "--include-personal"),
+        c("brief", "--out", "{out}/brief.md", creates="{out}/brief.md"),
+        c("brief", "--format", "html", "--out", "{out}/brief.html",
+          creates="{out}/brief.html"),
+    ],
     # Exit 2 from a content search means "the answer is incomplete", which is an
     # answer and not a crash. Only --scan-limit should produce it here. The
     # quarantined fixture used to as well, permanently, because the archive
@@ -686,7 +697,8 @@ ROUTES: dict[str, list[Check]] = {
 # one already deleted what it wanted to read. `run` is first because every
 # other route needs what it produces.
 ROUTE_ORDER = (
-    "doctor", "run", "status", "profiles", "voices", "memory", "digest", "search", "open",
+    "doctor", "run", "status", "profiles", "voices", "memory", "digest", "brief",
+    "search", "open",
     "verify", "ask", "export", "audit", "followups", "review", "backup", "restore",
     "speakers list", "speakers enroll",
     "speakers identify", "speakers forget", "quarantine", "release", "watch", "new-profile",

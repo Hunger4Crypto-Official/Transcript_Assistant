@@ -7,6 +7,7 @@ Plaud Bridge, without installing anything.
     python run.py watch                         keep processing on an interval
     python run.py digest                        combined digest, last 7 days
     python run.py digest --format html          self-contained page, prints cleanly
+    python run.py brief                         the week in one memo, with receipts
     python run.py review                        what the review cadence says is due
     python run.py followups                     commitments still open, oldest first
     python run.py status                        index summary
