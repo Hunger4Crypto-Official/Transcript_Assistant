@@ -7,6 +7,7 @@ Plaud Bridge command line.
     plaud-bridge watch                         keep processing on an interval
     plaud-bridge digest                        combined digest, last 7 days
     plaud-bridge digest --format html          self-contained page, prints cleanly
+    plaud-bridge brief                         the week in one memo, with receipts
     plaud-bridge review                        what the review cadence says is due
     plaud-bridge followups                     commitments still open, oldest first
     plaud-bridge insights                      how you talk: share, pace, questions
@@ -43,6 +44,8 @@ from pathlib import Path
 from . import __version__
 from .archive import Archive
 from .ask import ask, save_answer
+from .brief import build_brief
+from .brief import render as render_brief
 from .compliance import RetentionSweeper
 from .config import Config, ConfigError
 from .db import Database
@@ -337,6 +340,39 @@ def cmd_digest(args) -> int:
         else:
             body = builder.render_markdown(opts)
 
+        if args.out:
+            dest = Path(args.out)
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_text(body, encoding="utf-8")
+            print(f"wrote {dest}")
+        else:
+            print(body)
+        return 0
+    finally:
+        db.close()
+
+
+def cmd_brief(args) -> int:
+    """
+    The week, synthesised across the archive, with a receipt on every claim.
+
+    The digest is per-recording sections; this is what an aide who read all of
+    them would hand you. With no model reachable the deterministic skeleton is
+    the brief, clearly labelled as assembled rather than narrated, and that is
+    an exit 0 -- a memo built entirely from real data is a success.
+    """
+    cfg = _load(args)
+    db = Database(cfg.path("database"))
+    try:
+        archive = Archive(cfg, db)
+        brief = build_brief(
+            cfg, db, archive,
+            days=args.days if args.days is not None
+                 else int(cfg.get("brief.default_window_days", 7)),
+            include_personal=args.include_personal,
+            vault=archive.vault,
+        )
+        body = render_brief(brief, fmt=args.format)
         if args.out:
             dest = Path(args.out)
             dest.parent.mkdir(parents=True, exist_ok=True)
@@ -1884,6 +1920,16 @@ def build_parser() -> argparse.ArgumentParser:
                    help="html is self-contained and prints cleanly")
     p.add_argument("--title", default=None)
     p.set_defaults(func=cmd_digest)
+
+    p = sub.add_parser("brief",
+                       help="the week in one memo, synthesised across the archive")
+    p.add_argument("--days", type=int, default=None, help="lookback window (default 7)")
+    p.add_argument("--include-personal", action="store_true",
+                   help="include father/husband; their presence forces local processing")
+    p.add_argument("--out", default=None, help="write to a file instead of stdout")
+    p.add_argument("--format", default="markdown", choices=["markdown", "html"],
+                   help="html is self-contained and prints cleanly")
+    p.set_defaults(func=cmd_brief)
 
     p = sub.add_parser("followups",
                        help="commitments still open, and drafts you send yourself")
