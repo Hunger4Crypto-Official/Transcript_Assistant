@@ -1,6 +1,48 @@
 # Changelog
 
-## Unreleased — the clickable app, the charts, and the safety net
+## Unreleased — the second brain: brief, people, insights, and the player
+
+Four engines that turn an archive of recordings into something no note-taker
+ships, each headless-first (a CLI route wired into the smoke suite) and then
+surfaced in the app:
+
+- **`brief`** — the week synthesised across every recording: what moved, which
+  promises are aging, who is waiting on you, what to do next. Built in two
+  layers with a hard line between them: a deterministic skeleton read entirely
+  off disk (renders completely with no model at all, labelled **assembled**),
+  and a narrative layer whose every quoted receipt is verified verbatim with
+  the extractor's own `quote_is_present` — a fabricated quote or an un-sent
+  recording id is dropped, counted, and reported, never rendered. Locality and
+  redaction verdicts come from `ask`'s own functions, so the brief can never
+  reach a softer privacy conclusion than a question would.
+- **`people`** — one page per person, assembled from everywhere they were
+  heard: minutes, topics, verified quotes, commitments in both directions, and
+  every appearance. Two honesty rules are baked into the data: a speaker label
+  is attribution, not verified identity (`voice_verified` says which, and
+  placeholder labels are bucketed as "(unidentified speakers)" rather than
+  invented into a person), and nothing is shown that was not already verified
+  verbatim upstream. Personal recordings stay off the roster unless asked.
+- **`insights`** — how you actually talk, measured rather than remembered:
+  talk share, pace, question rate, longest monologue, silence share, and
+  overlap-based `interruptions_approx` (named so nobody quotes it without the
+  caveat), per speaker, per recording, and as a 30-day-vs-prior trend. Pure
+  arithmetic over the stored segments — no model, and nothing stored, so
+  `forget` has nothing new to chase.
+- **The moment player** — click a recording in the Library and hear it. The
+  original streams from the vault decrypted chunk by chunk straight into the
+  response; **plaintext never touches disk** — no temp files, no
+  decrypt-then-serve staging. Range requests are honoured exactly on plaintext
+  originals (scrubbing works) and refused on encrypted ones rather than staging
+  a decrypted copy to satisfy the seek — players buffer forward instead. The
+  synced transcript highlights the line under the playhead and clicking a line
+  jumps the audio. A tampered or truncated vault stream still dies loudly
+  mid-body; silent truncation stays impossible.
+
+The app grew **Brief**, **People**, and **Insights** tabs on the same
+token-guarded loopback server, all escaped before touching the DOM, all
+invalidated when a processing run finishes.
+
+## Earlier unreleased — the clickable app, the charts, and the safety net
 
 ### A window instead of a terminal
 

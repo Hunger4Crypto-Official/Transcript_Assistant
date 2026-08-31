@@ -88,6 +88,11 @@ Other commands:
 | `run.py export --days 30` | Build a redacted document for someone else |
 | `run.py forget <id>` | Permanently delete one recording |
 | `run.py memory` | **What it has learned across recordings** |
+| `run.py brief` | **The week in one memo, every claim receipted** |
+| `run.py people` | **One page per person, from everywhere they were heard** |
+| `run.py people --name "Marcus"` | One person's whole dossier |
+| `run.py insights` | **How you talk: share, pace, questions, monologues** |
+| `run.py insights --recording <id>` | One recording's per-speaker breakdown |
 | `run.py memory --brief` | The briefing injected into the next analysis |
 | `run.py memory --rebuild` | Rebuild the ledgers from the archive |
 | `run.py open <id>` | Decrypt and print a transcript |
@@ -544,9 +549,13 @@ record this" is not a batch decision; those release one at a time with
 
 Prefer a window? `python desktop_app.py` opens the same pipeline in your
 browser — passphrase, an Offline/free-cloud-key brain switch, drop recordings,
-Process, Open digest. `packaging/README.md` covers building the double-click
-Windows `PlaudBridge.exe`. The HTML digest opens with charts either way:
-minutes per section, activity across the window, and spend.
+Process, Open digest. The Library doubles as a player: click a recording and
+the original audio streams straight out of the vault (decrypted in flight,
+never written to disk in the clear) with the transcript following the
+playhead. Brief, People, and Insights tabs put the memo, the roster, and the
+talk-time numbers a click away. `packaging/README.md` covers building the
+double-click Windows `PlaudBridge.exe`. The HTML digest opens with charts
+either way: minutes per section, activity across the window, and spend.
 
 Before committing a big backlog to local processing, measure this machine:
 

@@ -617,6 +617,115 @@ class AppController:
             return {"ok": False, "error": "; ".join(failures[:3])}
         return {"ok": True, "removed": removed, "error": ""}
 
+    def people(self, include_personal: bool = False) -> dict:
+        """The roster: everyone the archive has heard, most present first."""
+        from ..people import PeopleError, collect_people
+
+        cfg, db, archive, vault = self._stores()
+        try:
+            roster = collect_people(cfg, db, archive,
+                                    include_personal=include_personal, vault=vault)
+        except PeopleError as exc:
+            return {"people": [], "error": str(exc)}
+        finally:
+            db.close()
+        return {"people": [p.to_dict() for p in roster], "error": ""}
+
+    def insights(self, days: int = 90, include_personal: bool = False) -> dict:
+        """Talk-time arithmetic over the window, shaped for charts."""
+        from ..insights import InsightsError, metrics_dict, trend
+
+        cfg, db, archive, _vault = self._stores()
+        try:
+            report = trend(cfg, db, archive, days=days,
+                           include_personal=include_personal)
+        except InsightsError as exc:
+            return {"report": None, "error": str(exc)}
+        finally:
+            db.close()
+        return {"report": metrics_dict(report), "error": ""}
+
+    def brief_html(self, days: int = 7, include_personal: bool = False,
+                   brain: Brain = Brain.CLOUD) -> str:
+        """
+        The week's memo as a self-contained page.
+
+        `build_brief` never raises for a missing model -- with no brain
+        reachable the deterministic skeleton renders, labelled as assembled --
+        so this is safe to call before anything is configured. The chosen
+        brain narrows the provider chain the same way processing does; the
+        brief's own locality rules still force local when personal material
+        is included.
+        """
+        from ..archive import Archive
+        from ..brief import build_brief
+        from ..brief import render as render_brief
+        from ..db import Database
+
+        cfg = self.load_config(brain)
+        db = Database(cfg.path("database"))
+        try:
+            archive = Archive(cfg, db)
+            brief = build_brief(cfg, db, archive, days=days,
+                                include_personal=include_personal,
+                                vault=archive.vault)
+        finally:
+            db.close()
+        return render_brief(brief, fmt="html")
+
+    def transcript(self, recording_id: str) -> dict:
+        """The stored segments, shaped for the player's synced transcript."""
+        from ..media import transcript_lines
+
+        cfg, db, archive, _vault = self._stores()
+        try:
+            lines = transcript_lines(cfg, db, archive, recording_id)
+        finally:
+            db.close()
+        if lines is None:
+            return {"ok": False, "lines": [], "error": (
+                "unknown recording, or its words cannot be opened -- "
+                "is the passphrase set?")}
+        return {"ok": True, "lines": lines, "error": ""}
+
+    def media_stream(self, recording_id: str,
+                     start: int | None = None, end: int | None = None) -> dict | None:
+        """
+        The original audio as (headers-worth-of-facts + a byte iterator).
+
+        None means no original is kept for that id -- an answer, not an error.
+        A Range request on a plaintext original is honoured exactly; on an
+        encrypted one the full decrypted stream comes back instead, because
+        byte-accurate seeking into the vault's sequential cipher stream would
+        require exactly the decrypt-to-temp-file staging `media.py` exists to
+        never do. Raises ValueError for an unsatisfiable range (the 416 case).
+        """
+        from ..media import locate_original, read_range, stream_plaintext
+
+        cfg, db, _archive, vault = self._stores()
+        try:
+            info = locate_original(cfg, db, recording_id)
+        finally:
+            db.close()
+        if info is None:
+            return None
+        if start is None or info.encrypted:
+            return {
+                "encrypted": info.encrypted,
+                "content_type": info.content_type,
+                "iter": stream_plaintext(cfg, info, vault),
+                "total": info.size_bytes,
+                "partial": False, "start": 0, "stop": None,
+            }
+        it, total = read_range(info, start, end, cfg, vault)
+        stop = (total - 1) if end is None else min(end, total - 1)
+        return {
+            "encrypted": False,
+            "content_type": info.content_type,
+            "iter": it, "total": total,
+            "partial": True, "start": start, "stop": stop,
+        }
+
     def backup(self) -> dict:
         """One encrypted file with everything worth keeping. Fail-closed."""
         from ..backup import BackupError, create_backup, default_backup_path

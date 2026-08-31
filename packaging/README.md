@@ -26,7 +26,10 @@ Double-click **PlaudBridge.exe**.
   app by itself. **Keep the black window open** while you use it; closing it
   stops the app.
 - In the browser: type your passphrase, pick Offline or the free cloud key, pick
-  your recordings, and press **Process**. When it's done, **Open digest**.
+  your recordings, and press **Process**. When it's done, **Open digest** — or
+  click a recording in **Library** to play the original with a synced
+  transcript, open **Brief** for the week in one memo, **People** for a page
+  per person, and **Insights** for how you actually talk.
 
 Your recordings, transcripts, and the encrypted vault live in a per-user folder
 (`%LOCALAPPDATA%\PlaudBridge`), not inside the app folder, so updating the app

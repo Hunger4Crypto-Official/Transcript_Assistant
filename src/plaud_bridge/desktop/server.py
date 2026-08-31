@@ -24,12 +24,14 @@ is the same engine the CLI and the tests use.
 from __future__ import annotations
 
 import json
+import re
 import secrets
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
+from ..storage import VaultError
 from .controller import AppController, Brain
 
 # Extensions the picker will accept an upload for. Mirrors the pipeline's own
@@ -338,8 +340,110 @@ class AppServer:
                     self._json(200, app.controller.followups(None if status == "all" else status))
                 elif route == "/api/quarantine":
                     self._json(200, {"entries": app.controller.quarantine()})
+                elif route == "/api/people":
+                    q = parse_qs(urlparse(self.path).query)
+                    personal = q.get("personal", ["0"])[0] == "1"
+                    self._json(200, app.controller.people(include_personal=personal))
+                elif route == "/api/insights":
+                    q = parse_qs(urlparse(self.path).query)
+                    personal = q.get("personal", ["0"])[0] == "1"
+                    try:
+                        days = max(1, min(int(q.get("days", ["90"])[0]), 3650))
+                    except ValueError:
+                        days = 90
+                    self._json(200, app.controller.insights(
+                        days=days, include_personal=personal))
+                elif route == "/api/brief":
+                    q = parse_qs(urlparse(self.path).query)
+                    personal = q.get("personal", ["0"])[0] == "1"
+                    try:
+                        days = max(1, min(int(q.get("days", ["7"])[0]), 3650))
+                    except ValueError:
+                        days = 7
+                    brain = self._brain(q.get("brain", [""])[0])
+                    try:
+                        html = app.controller.brief_html(
+                            days=days, include_personal=personal, brain=brain)
+                        self._send(200, html.encode("utf-8"), "text/html; charset=utf-8")
+                    except Exception as exc:  # noqa: BLE001
+                        self._send(500, f"could not build the brief: {exc}".encode(),
+                                   "text/plain")
+                elif route == "/api/transcript":
+                    rid = parse_qs(urlparse(self.path).query).get("id", [""])[0]
+                    result = app.controller.transcript(rid)
+                    self._json(200 if result["ok"] else 404, result)
+                elif route == "/api/media":
+                    self._serve_media(
+                        parse_qs(urlparse(self.path).query).get("id", [""])[0])
                 else:
                     self._json(404, {"error": "no such route"})
+
+            def _serve_media(self, recording_id: str) -> None:
+                """
+                Stream the original audio, honouring Range where honesty allows.
+
+                Plaintext originals get exact byte ranges (scrubbing works);
+                encrypted ones always stream whole from the vault, decrypted
+                chunk by chunk, never staged on disk. The first chunk is pulled
+                BEFORE headers go out, so a locked vault or wrong passphrase
+                answers as a clean error instead of a dead connection.
+                """
+                rng = (self.headers.get("Range") or "").strip()
+                start = end = None
+                m = re.fullmatch(r"bytes=(\d+)-(\d*)", rng)
+                if m:
+                    start = int(m.group(1))
+                    end = int(m.group(2)) if m.group(2) else None
+                try:
+                    media = app.controller.media_stream(recording_id, start, end)
+                except ValueError as exc:
+                    self._send(416, str(exc).encode(), "text/plain")
+                    return
+                if media is None:
+                    self._json(404, {"error": (
+                        "no original audio is kept for that recording -- "
+                        "archiving may be off, or retention removed it")})
+                    return
+
+                body = media["iter"]
+                try:
+                    first = next(body, b"")
+                except VaultError as exc:
+                    self._json(500, {"error": str(exc)})
+                    return
+
+                self.send_response(206 if media["partial"] else 200)
+                self.send_header("Content-Type", media["content_type"])
+                self.send_header("Cache-Control", "no-store")
+                if media["partial"]:
+                    self.send_header(
+                        "Content-Range",
+                        f"bytes {media['start']}-{media['stop']}/{media['total']}")
+                    self.send_header(
+                        "Content-Length", str(media["stop"] - media["start"] + 1))
+                    self.send_header("Accept-Ranges", "bytes")
+                else:
+                    if media["total"] is not None:
+                        self.send_header("Content-Length", str(media["total"]))
+                    # "none" tells the player not to try scrubbing an encrypted
+                    # stream it can only ever read forward.
+                    self.send_header(
+                        "Accept-Ranges", "none" if media["encrypted"] else "bytes")
+                self.end_headers()
+                try:
+                    if first:
+                        self.wfile.write(first)
+                    for chunk in body:
+                        self.wfile.write(chunk)
+                except (BrokenPipeError, ConnectionResetError):
+                    # The player stopped or sought; nothing is on disk and
+                    # nothing needs cleaning up.
+                    pass
+                except VaultError:
+                    # Tampering discovered mid-stream: the connection dies
+                    # visibly, which every player shows as a failed load.
+                    # Silent truncation is the one outcome never allowed.
+                    pass
 
             def do_POST(self):  # noqa: N802
                 if not self._guard():
@@ -432,7 +536,12 @@ class AppServer:
         return httpd
 
 
-_PAGE = """<!doctype html>
+# A RAW string, and load-bearing: the JS below contains "\n" inside string
+# literals, and a cooked Python string would bake real newlines into them --
+# an unterminated-literal SyntaxError that kills the whole script in the
+# browser while every server-side test still passes. test_desktop_phase2's
+# node --check guard exists so that can never come back quietly.
+_PAGE = r"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Plaud Bridge</title>
@@ -489,6 +598,11 @@ _PAGE = """<!doctype html>
   .badge.refusal { color:#fff; background:var(--bad); border-color:transparent; }
   .badge.no-announcement { color:#fff; background:var(--warn); border-color:transparent; }
   .badge.personal { color:#fff; background:#9f3a6d; border-color:transparent; }
+  .badge.verified { color:#fff; background:var(--ok); border-color:transparent; }
+  tr.click { cursor:pointer; } tr.click:hover td { background:var(--card); }
+  .statgrid { display:flex; gap:10px; flex-wrap:wrap; align-items:stretch; }
+  .statgrid .card { flex:1; min-width:230px; margin:0; }
+  #momentlines .hit.now { background:var(--card); }
   .hit { border-left:3px solid var(--accent); padding:6px 10px; margin:8px 0; }
   .hit .meta { color:var(--muted); font-size:.85rem; }
   .cite { border-left:3px solid var(--ok); padding:4px 10px; margin:6px 0; font-size:.92rem; }
@@ -515,6 +629,9 @@ _PAGE = """<!doctype html>
   <div class="tabs" id="tabs">
     <button data-tab="home" class="sel" onclick="showTab('home')">Process</button>
     <button data-tab="library" onclick="showTab('library')">Library</button>
+    <button data-tab="brief" onclick="showTab('brief')">Brief</button>
+    <button data-tab="people" onclick="showTab('people')">People</button>
+    <button data-tab="insights" onclick="showTab('insights')">Insights</button>
     <button data-tab="search" onclick="showTab('search')">Search</button>
     <button data-tab="ask" onclick="showTab('ask')">Ask</button>
     <button data-tab="followups" onclick="showTab('followups')">Follow-ups</button>
@@ -584,8 +701,86 @@ _PAGE = """<!doctype html>
         <label style="margin:0">Recordings</label>
         <button class="small" onclick="loadLibrary()">Refresh</button>
       </div>
+      <div class="detail">Click a recording to open it: the audio (when the original is
+      kept) plays right here, with the transcript following along.</div>
       <div id="librarylist" class="empty">loading...</div>
     </div>
+    <div class="card" id="moment" style="display:none">
+      <div class="row" style="justify-content:space-between">
+        <label style="margin:0" id="momenttitle">Player</label>
+        <button class="small" onclick="closeMoment()">Close</button>
+      </div>
+      <audio id="momentaudio" controls style="width:100%; margin-top:8px"></audio>
+      <div class="detail" id="momentnote"></div>
+      <div id="momentlines" style="max-height:340px; overflow:auto; margin-top:8px"></div>
+    </div>
+  </div>
+
+  <!-- ============ Brief ============ -->
+  <div id="tab-brief" hidden>
+    <div class="card">
+      <label>The week in one memo</label>
+      <p class="detail">A synthesis across every recording in the window: what actually
+      moved, which promises are aging, who is waiting on you, and what to do next. Every
+      quoted receipt is verified verbatim against what the archive holds &mdash; anything a
+      model invents is dropped and the drop is counted. With no analysis brain reachable
+      the memo still renders from the archive's own numbers, labelled as assembled.</p>
+      <div class="row">
+        <select id="briefdays" style="width:auto">
+          <option value="7" selected>Last 7 days</option>
+          <option value="14">Last 14 days</option>
+          <option value="30">Last 30 days</option>
+          <option value="90">Last 90 days</option>
+        </select>
+        <label style="margin:0; font-weight:400"><input type="checkbox" id="briefpersonal"> include personal</label>
+        <button class="primary" onclick="openBrief()">Open brief</button>
+      </div>
+      <div class="detail" id="briefpersonalwarn" style="display:none">
+        Personal material forces the memo to build fully offline, and makes it a document
+        worth not leaving on a shared screen.
+      </div>
+    </div>
+  </div>
+
+  <!-- ============ People ============ -->
+  <div id="tab-people" hidden>
+    <div class="card">
+      <div class="row" style="justify-content:space-between">
+        <label style="margin:0">Everyone the archive has heard</label>
+        <div class="row">
+          <label style="margin:0; font-weight:400"><input type="checkbox" id="peoplepersonal" onchange="loadPeople()"> include personal</label>
+          <button class="small" onclick="loadPeople()">Refresh</button>
+        </div>
+      </div>
+      <p class="detail">A name here is the speaker label as heard &mdash; attribution, not
+      verified identity, unless it matches a voice somebody deliberately enrolled.
+      Click a person for their whole page.</p>
+      <div id="peoplelist" class="empty">loading...</div>
+    </div>
+    <div id="persondetail"></div>
+  </div>
+
+  <!-- ============ Insights ============ -->
+  <div id="tab-insights" hidden>
+    <div class="card">
+      <div class="row" style="justify-content:space-between">
+        <label style="margin:0">How you actually talk</label>
+        <div class="row">
+          <select id="insightsdays" style="width:auto" onchange="loadInsights()">
+            <option value="30">Last 30 days</option>
+            <option value="90" selected>Last 90 days</option>
+            <option value="365">Last year</option>
+            <option value="3650">Everything</option>
+          </select>
+          <label style="margin:0; font-weight:400"><input type="checkbox" id="insightspersonal" onchange="loadInsights()"> include personal</label>
+          <button class="small" onclick="loadInsights()">Refresh</button>
+        </div>
+      </div>
+      <p class="detail">Talk share, pace, question rate, monologues &mdash; plain arithmetic
+      over the stored segments, checkable by hand against any transcript. Interruptions are
+      approximate by nature: they are timeline overlap, and diarization smears boundaries.</p>
+    </div>
+    <div id="insightsout" class="empty">loading...</div>
   </div>
 
   <!-- ============ Search ============ -->
@@ -697,11 +892,13 @@ async function GET(p){return (await fetch(p+(p.includes("?")?"&":"?")+"token="+T
 async function POST(p,b){return (await fetch(p,{method:"POST",headers:H,body:JSON.stringify(b||{})})).json();}
 
 /* ---- tabs ---- */
-const LOADERS={library:loadLibrary,followups:loadFollowups,held:loadHeld};
+const LOADERS={library:loadLibrary,people:loadPeople,insights:loadInsights,
+               followups:loadFollowups,held:loadHeld};
 const LOADED={};
+const TABS=["home","library","brief","people","insights","search","ask","followups","held","tools"];
 function showTab(name){
   for(const b of document.querySelectorAll("#tabs button")) b.classList.toggle("sel",b.dataset.tab===name);
-  for(const t of ["home","library","search","ask","followups","held","tools"]) $("tab-"+t).hidden=(t!==name);
+  for(const t of TABS) $("tab-"+t).hidden=(t!==name);
   if(LOADERS[name]&&!LOADED[name]){LOADED[name]=true;LOADERS[name]();}}
 
 /* ---- settings + readiness ---- */
@@ -746,7 +943,8 @@ async function poll(){
   const log=$("log"); log.textContent=j.lines.join("\n"); log.scrollTop=log.scrollHeight;
   if(!j.running){clearInterval(POLL); $("go").disabled=false;
     if(j.error){log.textContent+="\n\nSomething went wrong: "+j.error;}
-    else{$("view").disabled=false; LOADED.library=false; LOADED.followups=false; LOADED.held=false;
+    else{$("view").disabled=false; LOADED.library=false; LOADED.followups=false;
+      LOADED.held=false; LOADED.people=false; LOADED.insights=false;
       if(j.summary&&j.summary.quarantined>0){
         log.textContent+="\n"+j.summary.quarantined+" recording(s) were held for consent review — see the Held tab.";}}}}
 function openDigest(){
@@ -757,18 +955,152 @@ document.addEventListener("change",e=>{
   if(e.target&&e.target.id==="digestpersonal")
     $("personalwarn").style.display=e.target.checked?"block":"none";});
 
-/* ---- library ---- */
+/* ---- library + the moment player ---- */
 async function loadLibrary(){
   const el=$("librarylist"); el.className=""; el.textContent="loading...";
   const j=await GET("/api/recordings");
   if(!j.recordings.length){el.className="empty";el.textContent="Nothing processed yet. Drop a recording in the Process tab.";return;}
+  window._LIB=j.recordings;
   let html='<table class="list"><tr><th>When</th><th>Recording</th><th>Profile</th><th>Min</th><th></th></tr>';
-  for(const r of j.recordings){
-    html+=`<tr><td>${esc(r.when)}</td><td>${esc(r.name)}</td>
+  j.recordings.forEach((r,i)=>{
+    html+=`<tr class="click" onclick="openMoment(${i})"><td>${esc(r.when)}</td><td>${esc(r.name)}</td>
       <td>${esc(r.profile)}${r.personal?' <span class="badge personal">personal</span>':""}</td>
       <td>${esc(r.minutes)}</td>
-      <td>${r.stage==="quarantined"?'<span class="badge">held</span>':(r.encrypted?'<span class="badge">encrypted</span>':"")}</td></tr>`;}
+      <td>${r.stage==="quarantined"?'<span class="badge">held</span>':(r.encrypted?'<span class="badge">encrypted</span>':"")}</td></tr>`;});
   el.innerHTML=html+"</table>";}
+function fmtStamp(s){s=Math.max(0,Math.floor(s||0));const m=Math.floor(s/60);
+  return m+":"+String(s%60).padStart(2,"0");}
+function closeMoment(){const a=$("momentaudio"); a.pause(); a.removeAttribute("src"); a.load();
+  $("moment").style.display="none";}
+async function openMoment(i){
+  const r=(window._LIB||[])[i]; if(!r) return;
+  $("moment").style.display="block";
+  $("momenttitle").textContent=r.name;
+  $("momentnote").textContent="";
+  $("momentlines").innerHTML='<div class="empty">loading transcript...</div>';
+  const audio=$("momentaudio"); audio.pause();
+  audio.onerror=()=>{$("momentnote").textContent=
+    "No original audio is kept for this recording (or it cannot be opened). "+
+    "The transcript below still works.";};
+  audio.src="/api/media?id="+encodeURIComponent(r.id)+"&token="+TOKEN;
+  audio.load();
+  if(r.encrypted) $("momentnote").textContent=
+    "Encrypted original: it streams and decrypts as it plays, so it buffers forward "+
+    "rather than jumping. Nothing is ever written to disk in the clear.";
+  const j=await GET("/api/transcript?id="+encodeURIComponent(r.id));
+  if(!j.ok){$("momentlines").innerHTML='<div class="empty">'+esc(j.error)+"</div>";return;}
+  window._LINES=j.lines;
+  let html="";
+  j.lines.forEach((l,k)=>{
+    html+=`<div class="hit" style="cursor:pointer" onclick="seekLine(${k})">
+      <div class="meta">${fmtStamp(l.start)}${l.speaker?" · "+esc(l.speaker):""}</div>${esc(l.text)}</div>`;});
+  $("momentlines").innerHTML=html||'<div class="empty">No stored segments.</div>';
+  audio.ontimeupdate=()=>{
+    const t=audio.currentTime, lines=window._LINES||[];
+    let active=-1;
+    for(let k=0;k<lines.length;k++)
+      if(t>=lines[k].start&&(t<lines[k].end||k===lines.length-1)){active=k;break;}
+    document.querySelectorAll("#momentlines .hit").forEach((el,k)=>
+      el.classList.toggle("now",k===active));};
+  $("moment").scrollIntoView({behavior:"smooth"});}
+function seekLine(k){
+  const audio=$("momentaudio"), l=(window._LINES||[])[k]; if(!l) return;
+  try{audio.currentTime=l.start; audio.play();}catch(e){/* no audio: transcript-only */}}
+
+/* ---- brief ---- */
+function openBrief(){
+  const p=$("briefpersonal").checked?"1":"0";
+  window.open("/api/brief?token="+TOKEN+"&days="+$("briefdays").value+
+              "&personal="+p+"&brain="+BRAIN,"_blank");}
+document.addEventListener("change",e=>{
+  if(e.target&&e.target.id==="briefpersonal")
+    $("briefpersonalwarn").style.display=e.target.checked?"block":"none";});
+
+/* ---- people ---- */
+async function loadPeople(){
+  const el=$("peoplelist"); el.className=""; el.textContent="loading...";
+  const j=await GET("/api/people"+($("peoplepersonal").checked?"?personal=1":""));
+  if(j.error){el.className="empty";el.textContent=j.error;return;}
+  if(!j.people.length){el.className="empty";el.textContent="Nobody yet. Process a recording first.";return;}
+  window._PEOPLE=j.people;
+  let html='<table class="list"><tr><th>Name</th><th>Identity</th><th>Talks</th><th>Min</th><th>Last heard</th><th>Open</th></tr>';
+  j.people.forEach((p,i)=>{
+    html+=`<tr class="click" onclick="showPerson(${i})">
+      <td><b>${esc(p.display_name)}</b>${p.is_owner?' <span class="badge">you</span>':""}</td>
+      <td><span class="badge${p.voice_verified?" verified":""}">${esc(p.identity)}</span></td>
+      <td>${esc(p.conversations)}</td><td>${esc(p.minutes_heard)}</td>
+      <td>${esc(p.last_heard)}</td><td>${esc(p.open_items)}</td></tr>`;});
+  el.innerHTML=html+"</table>";
+  $("persondetail").innerHTML="";}
+function showPerson(i){
+  const p=(window._PEOPLE||[])[i]; if(!p) return;
+  let html=`<div class="card"><h3 style="margin:.2rem 0">${esc(p.display_name)}</h3>
+    <div class="detail">${esc(p.identity)} · ${esc(p.conversations)} conversation(s) ·
+    ${esc(p.minutes_heard)} min heard · first ${esc(p.first_heard)} · last ${esc(p.last_heard)}</div>`;
+  if(p.topics&&p.topics.length)
+    html+=`<div style="margin-top:8px"><b>Topics</b>: ${p.topics.map(esc).join(", ")}</div>`;
+  if(p.things_they_said&&p.things_they_said.length){
+    html+='<div style="margin-top:8px"><b>Things they said</b> <small>(verified verbatim)</small>';
+    for(const s of p.things_they_said) html+=`<div class="cite">&ldquo;${esc(s)}&rdquo;</div>`;
+    html+="</div>";}
+  const fu=(title,items)=>{
+    if(!items||!items.length) return "";
+    let h=`<div style="margin-top:8px"><b>${title}</b>`;
+    for(const c of items)
+      h+=`<div class="hit">${esc(c.text)}<div class="meta">${esc(c.status)}${c.due?" · due "+esc(c.due):""}${c.age_days!=null?" · "+esc(c.age_days)+"d old":""}</div></div>`;
+    return h+"</div>";};
+  html+=fu("They owe you",p.commitments_from_them);
+  html+=fu("You owe them",p.commitments_to_them);
+  if(p.appearances&&p.appearances.length){
+    html+='<div style="margin-top:8px"><b>Heard in</b>';
+    for(const a of p.appearances)
+      html+=`<div class="hit"><div class="meta">${esc(a.when)} · ${esc(a.source_name)} · ${esc(a.minutes)} min of them · ${esc(a.profile_id)}</div></div>`;
+    html+="</div>";}
+  $("persondetail").innerHTML=html+"</div>";
+  $("persondetail").scrollIntoView({behavior:"smooth"});}
+
+/* ---- insights ---- */
+async function loadInsights(){
+  const el=$("insightsout"); el.className=""; el.textContent="measuring...";
+  const days=$("insightsdays").value;
+  const personal=$("insightspersonal").checked?"&personal=1":"";
+  const j=await GET("/api/insights?days="+days+personal);
+  if(j.error||!j.report){el.className="empty";el.textContent=j.error||"nothing to measure yet";return;}
+  const r=j.report;
+  const pct=x=>Math.round((x||0)*100)+"%";
+  const num=x=>(x==null?"–":Math.round(x*10)/10);
+  const agg=(title,a)=>`<div class="card"><b>${title}</b>
+    <div class="detail">${a.recordings||0} recording(s) · about ${a.focus==="owner"?"you":"everyone"}</div>
+    <table class="list">
+    <tr><td>Talk share</td><td>${pct(a.share)}</td></tr>
+    <tr><td>Pace</td><td>${num(a.words_per_minute)} wpm</td></tr>
+    <tr><td>Question rate</td><td>${pct(a.question_rate)}</td></tr>
+    <tr><td>Longest monologue</td><td>${num(a.longest_monologue_seconds)}s</td></tr>
+    <tr><td>Interruptions (approx)</td><td>${a.interruptions_approx||0}</td></tr>
+    </table></div>`;
+  let html=`<div class="card"><div class="detail">last ${esc(r.days)} day(s)
+    · owner: ${esc(r.owner_label||"(not identified)")}
+    ${r.excluded_personal?" · "+esc(r.excluded_personal)+" personal recording(s) left out":""}
+    ${(r.unopened&&r.unopened.length)?" · <b>"+esc(r.unopened.length)+" could not be opened — these numbers are incomplete</b>":""}
+    </div></div>`;
+  html+=`<div class="statgrid">${agg("Whole window",r.overall)}${agg("Last 30 days",r.current)}${agg("The 30 before",r.prior)}</div>`;
+  const dk=Object.keys(r.deltas||{});
+  if(dk.length){
+    const label={talk_share:"Talk share",words_per_minute:"Pace (wpm)",
+                 question_rate:"Question rate",longest_monologue_seconds:"Longest monologue (s)"};
+    html+='<div class="card"><b>Last 30 days against the 30 before</b><table class="list">';
+    for(const k of dk){const v=r.deltas[k];
+      html+=`<tr><td>${esc(label[k]||k)}</td><td>${v>0?"+":""}${Math.round(v*1000)/1000}</td></tr>`;}
+    html+="</table></div>";}
+  if(r.recordings&&r.recordings.length){
+    html+='<div class="card"><b>Per recording</b><table class="list"><tr><th>When</th><th>Recording</th><th>Min</th><th>Your share</th><th>Questions</th></tr>';
+    for(const m of r.recordings){
+      const own=(m.speakers||[]).find(s=>s.is_owner);
+      html+=`<tr><td>${esc(String(m.when||"").slice(0,10))}</td><td>${esc(m.source_name)}</td>
+        <td>${num((m.duration_seconds||0)/60)}</td>
+        <td>${own?pct(own.share):"–"}</td><td>${m.questions||0}</td></tr>`;}
+    html+="</table></div>";}
+  el.innerHTML=html;}
 
 /* ---- search ---- */
 async function doSearch(){
