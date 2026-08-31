@@ -17,6 +17,7 @@ Plaud Bridge command line.
     plaud-bridge export                        redacted document for someone else
     plaud-bridge forget <recording_id>         delete one recording, permanently
     plaud-bridge memory                        what it has learned across recordings
+    plaud-bridge people                        everyone it has heard, by name
     plaud-bridge audit                         read the compliance audit log
     plaud-bridge release <recording_id>        release a quarantined recording
     plaud-bridge quarantine                    triage everything in quarantine at once
@@ -49,6 +50,7 @@ from .followups import FollowUpError, collect, draft, render, set_status
 from .logging_setup import setup
 from .memory import MemoryStore, carry_forward_brief, render_ledger
 from .models import format_stamp
+from .people import PeopleError, collect_people, person_detail, render_person, render_roster
 from .pipeline import Pipeline
 from .storage import Vault, VaultError
 from .voice import Voice
@@ -402,6 +404,47 @@ def cmd_followups(args) -> int:
 
         body = render(items, fmt="html" if args.format == "html" else "markdown",
                       title=args.title or None)
+        if args.out:
+            dest = Path(args.out)
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_text(body, encoding="utf-8")
+            print(f"wrote {dest}")
+        else:
+            print(body)
+        return 0
+    finally:
+        db.close()
+
+
+def cmd_people(args) -> int:
+    """
+    Everyone the archive has heard, or one person's whole page.
+
+    Read-only. The roster is built from artifacts already on disk, and the
+    honesty rules live in `people.py`: a speaker label is attribution rather
+    than verified identity, placeholders are bucketed rather than personified,
+    and personal recordings stay out unless asked for by flag.
+    """
+    cfg = _load(args)
+    db = Database(cfg.path("database"))
+    try:
+        archive = Archive(cfg, db)
+        fmt = "html" if args.format == "html" else "markdown"
+        try:
+            people = collect_people(
+                cfg, db, archive,
+                include_personal=args.include_personal,
+                days=args.days,
+                vault=archive.vault,
+            )
+            if args.name:
+                body = render_person(person_detail(people, args.name), fmt=fmt)
+            else:
+                body = render_roster(people, fmt=fmt, title=args.title or None)
+        except PeopleError as exc:
+            print(f"\n{exc}\n", file=sys.stderr)
+            return 1
+
         if args.out:
             dest = Path(args.out)
             dest.parent.mkdir(parents=True, exist_ok=True)
@@ -2001,6 +2044,22 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--force", action="store_true",
                    help="replace data already in place, including the config directory")
     p.set_defaults(func=cmd_restore)
+
+    p = sub.add_parser("people",
+                       help="everyone the archive has heard, or one person's page")
+    p.add_argument("--name", default=None, metavar="NAME",
+                   help='one person\'s full dossier, e.g. --name "Marcus"')
+    p.add_argument("--days", type=int, default=None,
+                   help="lookback window. The default is everything: a person "
+                        "does not stop existing because you last spoke in March.")
+    p.add_argument("--include-personal",
+                   action="store_true",
+                   help="include people from father/husband recordings")
+    p.add_argument("--format", default="markdown", choices=["markdown", "html"],
+                   help="html is self-contained and prints cleanly")
+    p.add_argument("--out", default=None, help="write to a file instead of stdout")
+    p.add_argument("--title", default=None)
+    p.set_defaults(func=cmd_people)
 
     return ap
 
