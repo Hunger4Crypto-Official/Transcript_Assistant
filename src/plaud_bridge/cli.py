@@ -3,6 +3,8 @@
 Plaud Bridge command line.
 
     plaud-bridge doctor                        preflight every dependency and key
+    plaud-bridge demo                          fill it with samples to explore
+    plaud-bridge app                           the local app, from the terminal
     plaud-bridge run                           process everything in the inbox
     plaud-bridge watch                         keep processing on an interval
     plaud-bridge digest                        combined digest, last 7 days
@@ -1887,6 +1889,94 @@ def cmd_restore(args) -> int:
     return 0
 
 
+def cmd_demo(args) -> int:
+    """
+    Furnish the archive with fictional samples, so nothing starts empty.
+
+    The samples go through the ordinary pipeline -- there is no pre-baked
+    database and no path the real code would not take. Every sample is labelled
+    as fictional in its own first line, so nobody can meet this content later
+    without knowing what it is.
+    """
+    from . import demo
+
+    cfg = _load(args)
+    if args.clean:
+        removed = demo.clean(cfg)
+        if not removed:
+            print("\nNo sample files were waiting in the inbox.\n")
+            return 0
+        print("\nremoved from the inbox:")
+        for path in removed:
+            print(f"  {path.name}")
+        print("\nAnything already processed stays in the archive; use "
+              "`forget <id>` to remove those.\n")
+        return 0
+
+    written, skipped = demo.install(cfg, overwrite=args.force)
+    print()
+    for path in written:
+        print(f"  wrote {path.name}")
+    for path in skipped:
+        print(f"  kept  {path.name} (already in the inbox; --force replaces it)")
+    print("\n" + demo.describe())
+    if not args.process:
+        print("\nNow run:  python run.py run")
+        print("Then try: run.py digest --format html · run.py brief · "
+              "run.py people · run.py insights\n")
+        return 0
+
+    print("\nProcessing them now...\n")
+    return cmd_run(args)
+
+
+def cmd_app(args) -> int:
+    """
+    The local app, started from the command line.
+
+    Same server the packaged Windows build runs -- this is only a different
+    front door to it, so anything true in the app is true here. `--probe`
+    stands it up, checks it answers, and exits: a self-test for the whole app
+    stack that needs no browser and no human.
+    """
+    from .desktop.launch import build
+
+    base_dir = Path(args.home).expanduser() if args.home else None
+    app, httpd, url = build(base_dir=base_dir, port=args.port, phone=args.phone)
+    try:
+        if args.probe:
+            import threading
+            import urllib.request
+
+            threading.Thread(target=httpd.serve_forever, daemon=True).start()
+            page = urllib.request.urlopen(url, timeout=10)
+            body = page.read()
+            ok = page.status == 200 and app.token.encode() in body
+            print(f"\napp probe: {'ok' if ok else 'FAILED'} -- "
+                  f"served {len(body)} bytes on {url.split('/?')[0]}")
+            print(f"  token guard: {'on' if app.token else 'MISSING'}")
+            print(f"  phone mode:  {app.lan_url or 'off (loopback only)'}\n")
+            return 0 if ok else 1
+
+        print("\nPlaud Bridge is running.")
+        print(f"  Open this in your browser:\n    {url}")
+        if app.lan_url:
+            print(f"  On your phone (same Wi-Fi):\n    {app.lan_url}")
+            print("  Home network only -- the link carries this session's key.")
+        print("  Press Ctrl-C to stop.\n")
+        try:
+            httpd.serve_forever()
+        except KeyboardInterrupt:
+            print("\nStopping.")
+        return 0
+    finally:
+        # Closing the socket is the whole cleanup in both paths. Deliberately
+        # no shutdown(): it blocks forever waiting on a serve_forever loop,
+        # which by here has either already returned or is a daemon thread the
+        # process is about to leave behind.
+        httpd.server_close()
+
+
 # =========================================================================
 def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(
@@ -2135,6 +2225,28 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--force", action="store_true",
                    help="replace data already in place, including the config directory")
     p.set_defaults(func=cmd_restore)
+
+    p = sub.add_parser("demo",
+                       help="fill the archive with fictional samples to explore")
+    p.add_argument("--process", action="store_true",
+                   help="run the pipeline over them straight away")
+    p.add_argument("--clean", action="store_true",
+                   help="remove sample files still waiting in the inbox")
+    p.add_argument("--force", action="store_true",
+                   help="replace sample files already in the inbox")
+    # `--process` hands off to cmd_run, which reads this too.
+    p.set_defaults(func=cmd_demo, limit=None)
+
+    p = sub.add_parser("app", help="run the local app from the command line")
+    p.add_argument("--port", type=int, default=0,
+                   help="port to bind (default: an unused one)")
+    p.add_argument("--home", default=None,
+                   help="data directory the app should use")
+    p.add_argument("--phone", action="store_true",
+                   help="also answer this machine's Wi-Fi address (home network only)")
+    p.add_argument("--probe", action="store_true",
+                   help="start it, check it answers, print the result, and exit")
+    p.set_defaults(func=cmd_app)
 
     p = sub.add_parser("people",
                        help="everyone the archive has heard, or one person's page")

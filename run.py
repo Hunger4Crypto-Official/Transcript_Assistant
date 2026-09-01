@@ -3,6 +3,8 @@
 Plaud Bridge, without installing anything.
 
     python run.py doctor                        preflight every dependency and key
+    python run.py demo                          fill it with samples to explore
+    python run.py app                           the local app, from the terminal
     python run.py run                           process everything in the inbox
     python run.py watch                         keep processing on an interval
     python run.py digest                        combined digest, last 7 days

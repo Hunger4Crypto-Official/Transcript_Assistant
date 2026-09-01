@@ -1,6 +1,38 @@
 # Changelog
 
-## Unreleased — the second brain: brief, people, insights, and the player
+## Unreleased — a furnished first five minutes, and proofs instead of examples
+
+- **`demo`** — a fresh install no longer opens onto seven empty tabs. The
+  command writes fictional sample recordings into the inbox and (with
+  `--process`) runs them through the ordinary pipeline: no pre-baked database,
+  no path the real code would never take. The set is chosen to show several
+  states at once — a consented client call (encrypted), a coaching session
+  (plaintext at rest, so the player can scrub it), a family conversation
+  (forced local, kept out of shared digests), and a call with no consent
+  exchange, which the gate holds so you watch it work rather than read about
+  it. Every sample announces itself as fiction in its own first line, so the
+  label survives into the transcript, search, and the player; nothing already
+  in the inbox is ever overwritten, and `--clean` removes only files from the
+  catalogue. The app's empty Library offers the same thing as a button.
+- **`app`** — the local app started from the terminal, and `app --probe`: it
+  stands the whole server stack up, checks it really serves a token-guarded
+  page, prints the verdict, and exits. That makes the app itself a headless,
+  scriptable self-test, and it now runs as part of the smoke suite — the one
+  gate that previously covered every route except the app.
+- **Property-based tests** (`hypothesis`) over the parts where "we tried some
+  examples" is too weak a claim. The load-bearing one, stated as an invariant
+  rather than a case: *a vault artifact either returns exactly the bytes that
+  were written, or raises — there is no third outcome.* Generated plaintexts,
+  arbitrary single-byte mutations anywhere in the file, arbitrary truncations,
+  and reads under the wrong recording id all have to end in exact bytes or a
+  `VaultError`. Verified to have teeth by defeating both of the vault's guard
+  layers at once and watching the properties fail. Also covers the upload
+  filename sanitiser (it can never escape the inbox), question detection
+  (total and deterministic over any recogniser output), content types, and
+  Range serving (never a byte outside what was asked for).
+- **Command palette** (Ctrl-K) and a sample-loading empty state in the app.
+
+## Earlier unreleased — the second brain: brief, people, insights, and the player
 
 Four engines that turn an archive of recordings into something no note-taker
 ships, each headless-first (a CLI route wired into the smoke suite) and then

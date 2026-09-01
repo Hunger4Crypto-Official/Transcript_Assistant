@@ -56,6 +56,25 @@ python run.py doctor
 `doctor` tells you exactly what is missing and what will break as a result.
 Fix every `FAIL` before your first real run.
 
+### See it working before you record anything
+
+```bash
+python run.py demo --process     # fictional samples, through the real pipeline
+python run.py brief              # then look around
+python run.py people
+python run.py insights
+python run.py digest --format html --out data/outbox/demo.html
+```
+
+The samples are labelled fiction in their own first line, and they are chosen
+to show several states at once: a consented client call (encrypted), a
+coaching session (plaintext at rest), a family conversation (forced local and
+kept out of shared digests), and one call with no consent exchange — which the
+gate holds, so you watch it work rather than take its word for it.
+
+`python run.py demo --clean` removes any samples still waiting in the inbox;
+anything already processed comes out with `forget <id>` like any recording.
+
 ---
 
 ## Daily use
@@ -79,6 +98,9 @@ Other commands:
 | Command | What it does |
 |---|---|
 | `run.py doctor` | Preflight every dependency, key, and profile |
+| `run.py demo --process` | **Fill it with labelled samples and process them** |
+| `run.py app` | The local app, from the terminal |
+| `run.py app --probe` | Start it, check it answers, exit — a headless self-test |
 | `run.py status` | Index summary: counts, hours, spend |
 | `run.py watch` | Process the inbox on an interval until you stop it |
 | `run.py search "elimination period"` | Find recordings by filename |

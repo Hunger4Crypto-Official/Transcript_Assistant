@@ -726,6 +726,22 @@ class AppController:
             "partial": True, "start": start, "stop": stop,
         }
 
+    def install_samples(self) -> dict:
+        """
+        Drop the fictional sample recordings into the inbox.
+
+        Only writes them; the caller starts the ordinary processing run, so
+        the samples take exactly the path a real recording takes. Never
+        overwrites a file already in the inbox -- somebody's real recording
+        does not get replaced because they clicked "load samples".
+        """
+        from .. import demo
+
+        cfg = self.load_config(Brain.CLOUD)
+        written, skipped = demo.install(cfg)
+        return {"ok": True, "written": len(written), "skipped": len(skipped),
+                "names": [p.name for p in written], "error": ""}
+
     def backup(self) -> dict:
         """One encrypted file with everything worth keeping. Fail-closed."""
         from ..backup import BackupError, create_backup, default_backup_path

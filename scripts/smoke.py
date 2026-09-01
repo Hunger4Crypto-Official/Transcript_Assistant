@@ -604,6 +604,25 @@ ROUTES: dict[str, list[Check]] = {
         c("people", "--format", "html", "--out", "{out}/people.html",
           creates="{out}/people.html"),
     ],
+    # The samples go in and come back out, so the route leaves the inbox as it
+    # found it. Ordered last (see ROUTE_ORDER) because anything that processes
+    # the inbox afterwards would pick them up and change other routes' counts.
+    "demo": [
+        c("demo", contains="wrote", quick=True),
+        # A second run must not clobber what is already in the inbox.
+        c("demo", contains="kept"),
+        c("demo", "--force", contains="wrote"),
+        c("demo", "--clean", contains="removed"),
+        c("demo", "--clean", contains="No sample files"),
+    ],
+    # The app is the packaged build's own front door, so a headless probe of it
+    # is the one check that covers the whole server stack from outside. --home
+    # keeps it inside the throwaway project; without it the app would install
+    # itself into the real user's data directory.
+    "app": [
+        c("app", "--probe", "--home", "{out}/apphome",
+          contains="app probe: ok", quick=True),
+    ],
     "review": [
         c("review", quick=True),
         c("review", "--days", "7"),
@@ -732,6 +751,10 @@ ROUTE_ORDER = (
     "speakers list", "speakers enroll",
     "speakers identify", "speakers forget", "quarantine", "release", "watch", "new-profile",
     "retention", "forget",
+    # Last: `demo` fills the inbox, and any route that processes it afterwards
+    # would take the samples and change what every other route sees. `app`
+    # stands up a server, so it goes where a stray port cannot disturb anything.
+    "demo", "app",
 )
 
 

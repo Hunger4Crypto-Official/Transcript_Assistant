@@ -30,6 +30,10 @@ Double-click **PlaudBridge.exe**.
   click a recording in **Library** to play the original with a synced
   transcript, open **Brief** for the week in one memo, **People** for a page
   per person, and **Insights** for how you actually talk.
+- Want to look around before recording anything? The empty Library offers
+  **load sample recordings** — clearly labelled fiction, run through the real
+  pipeline, so every tab fills in. **Ctrl-K** opens a command palette that
+  jumps anywhere.
 
 Your recordings, transcripts, and the encrypted vault live in a per-user folder
 (`%LOCALAPPDATA%\PlaudBridge`), not inside the app folder, so updating the app

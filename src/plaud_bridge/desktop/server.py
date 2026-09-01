@@ -525,6 +525,17 @@ class AppServer:
                 elif route == "/api/backup":
                     result = app.controller.backup()
                     self._json(200 if result["ok"] else 400, result)
+                elif route == "/api/demo":
+                    # Write the samples, then start the ordinary run over them
+                    # -- no special processing path, so what a person explores
+                    # is the real pipeline's own output.
+                    try:
+                        result = app.controller.install_samples()
+                    except Exception as exc:  # noqa: BLE001
+                        self._json(400, {"ok": False, "error": str(exc)})
+                        return
+                    result["started"] = app.start_processing(Brain.CLOUD)
+                    self._json(200, result)
                 else:
                     self._json(404, {"error": "no such route"})
 
@@ -881,7 +892,19 @@ _PAGE = r"""<!doctype html>
     </div>
   </div>
 
-  <div class="footer">Loopback-only &middot; token-guarded &middot; nothing here can send anything on your behalf.</div>
+  <div class="footer">Loopback-only &middot; token-guarded &middot; nothing here can send anything on your behalf.
+  <br>Press <b>Ctrl-K</b> for the command palette.</div>
+</div>
+
+<div id="palette" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,.45); z-index:50"
+     onclick="if(event.target===this)closePalette()">
+  <div style="max-width:520px; margin:12vh auto 0; background:var(--bg); border:1px solid var(--line);
+              border-radius:12px; overflow:hidden">
+    <input id="palettein" type="text" placeholder="Go to... (type to filter, Enter to run)"
+           style="border:none; border-bottom:1px solid var(--line); border-radius:0; padding:14px 16px"
+           oninput="renderPalette()" onkeydown="paletteKey(event)">
+    <div id="paletteout" style="max-height:50vh; overflow:auto"></div>
+  </div>
 </div>
 <script>
 const TOKEN="__TOKEN__"; let BRAIN="cloud"; let POLL=null;
@@ -956,10 +979,26 @@ document.addEventListener("change",e=>{
     $("personalwarn").style.display=e.target.checked?"block":"none";});
 
 /* ---- library + the moment player ---- */
+/* Declared at top level, not inside loadLibrary: the empty state's button is an
+   inline onclick, which only ever resolves against global scope. */
+async function loadSamples(){
+  const el=$("librarylist"); el.className="";
+  el.textContent="writing the samples and processing them...";
+  const j=await POST("/api/demo",{});
+  if(!j.ok){el.className="empty";
+    el.textContent="could not load the samples: "+(j.error||"unknown");return;}
+  const log=$("log"); log.style.display="block";
+  POLL=setInterval(poll,1000); poll();
+  el.textContent="processing "+j.written+" sample recording(s); this tab fills in when it finishes.";}
 async function loadLibrary(){
   const el=$("librarylist"); el.className=""; el.textContent="loading...";
   const j=await GET("/api/recordings");
-  if(!j.recordings.length){el.className="empty";el.textContent="Nothing processed yet. Drop a recording in the Process tab.";return;}
+  if(!j.recordings.length){el.className="empty";
+    el.innerHTML='Nothing processed yet. Drop a recording in the Process tab &mdash; or '+
+      '<button class="small" onclick="loadSamples()">load sample recordings</button> '+
+      'to see what every tab looks like with something in it. '+
+      '<span class="detail">The samples are clearly labelled fiction; delete them any time from Held or with <code>forget</code>.</span>';
+    return;}
   window._LIB=j.recordings;
   let html='<table class="list"><tr><th>When</th><th>Recording</th><th>Profile</th><th>Min</th><th></th></tr>';
   j.recordings.forEach((r,i)=>{
@@ -1214,6 +1253,51 @@ async function applyUpdate(){
     if(j.applied){msg.textContent=j.message+" You can close this tab; the app reopens itself.";}
     else{msg.textContent="Could not update: "+(j.error||"unknown"); btn.disabled=false;}
   }catch(e){msg.textContent="Could not update: "+e; btn.disabled=false;}}
+/* ---- command palette ----
+   Every action here is one the tabs already offer; the palette is a faster
+   door to them, never a second implementation of anything. */
+const COMMANDS=[
+  {name:"Process recordings",run:()=>showTab("home")},
+  {name:"Library and player",run:()=>showTab("library")},
+  {name:"Open the digest",run:()=>{showTab("library");openDigest();}},
+  {name:"Brief: the week in one memo",run:()=>showTab("brief")},
+  {name:"Open the brief now",run:()=>{showTab("brief");openBrief();}},
+  {name:"People: everyone heard",run:()=>showTab("people")},
+  {name:"Insights: how you talk",run:()=>showTab("insights")},
+  {name:"Search what was said",run:()=>{showTab("search");$("searchq").focus();}},
+  {name:"Ask the archive a question",run:()=>{showTab("ask");$("askq").focus();}},
+  {name:"Follow-ups worklist",run:()=>showTab("followups")},
+  {name:"Held for consent review",run:()=>showTab("held")},
+  {name:"Back up everything",run:()=>{showTab("tools");doBackup();}},
+  {name:"Load sample recordings",run:()=>{showTab("library");loadSamples();}},
+  {name:"Tools and phone mode",run:()=>showTab("tools")},
+];
+let PSEL=0;
+function openPalette(){$("palette").style.display="block";
+  const i=$("palettein"); i.value=""; PSEL=0; renderPalette(); i.focus();}
+function closePalette(){$("palette").style.display="none";}
+function paletteMatches(){
+  const q=$("palettein").value.trim().toLowerCase();
+  return COMMANDS.filter(c=>!q||c.name.toLowerCase().includes(q));}
+function renderPalette(){
+  const items=paletteMatches();
+  if(PSEL>=items.length) PSEL=Math.max(0,items.length-1);
+  $("paletteout").innerHTML=items.length
+    ?items.map((c,i)=>`<div class="hit" style="cursor:pointer;margin:0;border-left-color:${i===PSEL?"var(--accent)":"transparent"}"
+        onclick="runPalette(${i})">${esc(c.name)}</div>`).join("")
+    :'<div class="empty" style="padding:14px 16px">nothing matches</div>';}
+function runPalette(i){const items=paletteMatches(); const c=items[i];
+  if(c){closePalette(); c.run();}}
+function paletteKey(e){
+  const items=paletteMatches();
+  if(e.key==="Escape"){closePalette();}
+  else if(e.key==="ArrowDown"){PSEL=Math.min(PSEL+1,items.length-1);renderPalette();e.preventDefault();}
+  else if(e.key==="ArrowUp"){PSEL=Math.max(PSEL-1,0);renderPalette();e.preventDefault();}
+  else if(e.key==="Enter"){runPalette(PSEL);e.preventDefault();}}
+document.addEventListener("keydown",e=>{
+  if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==="k"){openPalette();e.preventDefault();}
+  else if(e.key==="Escape"&&$("palette").style.display==="block"){closePalette();}});
+
 const MF=document.createElement("link"); MF.rel="manifest";
 MF.href="/manifest.webmanifest?token="+TOKEN; document.head.appendChild(MF);
 refresh(); checkUpdate();

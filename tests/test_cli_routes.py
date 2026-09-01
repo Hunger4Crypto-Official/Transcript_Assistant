@@ -30,7 +30,7 @@ COVERED = {
     "doctor", "run", "watch", "digest", "status", "search", "verify", "forget",
     "export", "open", "audit", "release", "quarantine", "retention", "profiles",
     "new-profile", "voices", "review", "speakers", "followups", "ask",
-    "memory", "backup", "restore", "insights", "people", "brief",
+    "memory", "backup", "restore", "insights", "people", "brief", "demo", "app",
 }
 
 
