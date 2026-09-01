@@ -31,6 +31,26 @@
   (total and deterministic over any recogniser output), content types, and
   Range serving (never a byte outside what was asked for).
 - **Command palette** (Ctrl-K) and a sample-loading empty state in the app.
+- **The audio path has now actually run on audio.** Every previous test fed
+  the pipeline text transcripts, which left the code that decodes, normalises,
+  chunks and probes real media unexercised. Two new suites generate real audio
+  with ffmpeg (no fixture binaries in the repository) and run the real
+  `AudioPreparer` and the real `Pipeline` over it: mono/16-bit/sample-rate
+  conversion verified by decoding the output with Python's own `wave` module,
+  every accepted container decoded rather than merely listed, the
+  duration-budget refusal proven to happen *before* anything is written, and
+  chunk coverage asserted so no second of a recording can end up in no chunk.
+  The end-to-end run stubs only the recogniser — and the stub validates the
+  audio it is handed, so "stubbed" cannot quietly mean "skipped". A real mp3
+  goes in and comes back out of the vault byte-identical and still playable.
+  They skip with a reason when ffmpeg is absent rather than passing hollowly.
+- **Documented a design truth that would have surprised the first real user**:
+  with diarization off (the default — it needs a HuggingFace token), every
+  audio segment is labelled `SPEAKER`, so the consent detector cannot tell who
+  announced the recording or who agreed and honestly refuses to certify
+  consent. A consented client call is therefore held for review. That is
+  correct behaviour, it is now pinned by a test, and it is called out in the
+  README along with its effect on People and Insights.
 
 ## Earlier unreleased — the second brain: brief, people, insights, and the player
 

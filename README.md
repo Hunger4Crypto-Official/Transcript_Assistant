@@ -142,6 +142,33 @@ Other commands:
 `pip install -e .` installs the same commands as `plaud-bridge`, if you would
 rather not type `python run.py` from the project directory.
 
+### Real audio: expect the Held tab on day one
+
+Worth knowing before your first recording, because it surprises everyone.
+
+**Without diarization, every segment of an audio recording is labelled
+`SPEAKER`** — one indistinguishable voice. Diarization is off by default
+because it needs a HuggingFace token and an accepted model licence
+(`pip install -e ".[diarize]"`, then set the token). Text transcripts are
+unaffected: they carry `Name:` prefixes, so speakers are known.
+
+The consequence is deliberate and worth stating plainly: for audio with
+diarization off, the consent detector **cannot tell who announced the
+recording or who agreed**, so it refuses to certify consent. A client call
+where consent was clearly obtained is still held for review, and you release
+it yourself after listening. That is the honest outcome — the alternative is a
+tool that certifies consent it cannot actually see — but it means a
+consent-requiring profile will fill the Held tab until diarization is on.
+
+It also means, until diarization is enabled, that **People** shows audio
+speakers as "(unidentified speakers)" and **Insights** reports one speaker at
+100% talk share. Those views come into their own with diarization on, or with
+imported text transcripts.
+
+This is pinned by tests, not just documented:
+`tests/test_real_audio_end_to_end.py` runs real ffmpeg-generated audio through
+the whole pipeline and asserts exactly this behaviour.
+
 ### When it cannot actually hear anything
 
 Speech recognition does not decline. Given music, a restaurant, a recital, or a
