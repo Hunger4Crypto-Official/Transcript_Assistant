@@ -48,10 +48,9 @@ coverage:
 	python -m pytest tests/ -q --cov=src/plaud_bridge --cov-branch \
 		--cov-report=term-missing --cov-fail-under=$(COVERAGE_FLOOR)
 
-# Provisional. Line coverage measured 87%; the branch-inclusive figure was
-# still being measured when this landed, so the floor sits deliberately
-# under it. It only ever moves up from here.
-COVERAGE_FLOOR ?= 80
+# Measured 2026-09-06 over 829 tests: 9336 statements, 1228 missed; 3046
+# branches, 446 partial; combined 85%. Rounded down, and it only moves up.
+COVERAGE_FLOOR ?= 85
 
 smoke:
 	python scripts/smoke.py
