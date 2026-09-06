@@ -118,6 +118,63 @@ def test_the_static_lock_leaves_other_profiles_untouched(tmp_path, monkeypatch):
     assert verdict.consent is ConsentStatus.DETECTED
 
 
+def test_a_cloud_allowed_profile_alone_is_not_forced_local(tmp_path, monkeypatch):
+    """
+    The other side of the locality floor. The floor exists so one private
+    sentence locks a whole recording down; it must NOT also lock down a
+    recording nothing private touched, or "cloud allowed" would be a setting
+    with no effect and every work call would silently run offline.
+    """
+    cfg, _ = build_sandbox(tmp_path, monkeypatch)
+    trainer = cfg.profile("sales_trainer")
+    assert trainer.allow_cloud_llm is True and trainer.hard_local_only is False
+
+    verdict = ComplianceGate(cfg).evaluate(_routed("sales_trainer"))
+
+    assert verdict.allow is True
+    assert verdict.force_local_processing is False
+    assert not any("local-only" in r for r in verdict.reasons), verdict.reasons
+
+
+def test_a_route_naming_a_profile_that_no_longer_exists_is_skipped_not_fatal(tmp_path, monkeypatch):
+    """
+    A profile can be deleted from config/profiles/ after recordings were routed
+    to it. The gate must step over the ghost id and judge the recording by the
+    profiles that still exist, rather than crash on a KeyError or -- worse --
+    treat the unknown id as a reason to relax anything.
+    """
+    cfg, _ = build_sandbox(tmp_path, monkeypatch)
+    rec = _routed("insurance_agent")
+    rec.routes.append(RouteMatch(profile_id="profile_that_was_deleted", confidence=0.99))
+
+    verdict = ComplianceGate(cfg).evaluate(rec)
+
+    assert verdict.allow is True
+    assert verdict.governing_profile == "insurance_agent"
+    assert verdict.consent is ConsentStatus.DETECTED
+
+
+def test_an_announcement_with_no_agreement_says_exactly_that(tmp_path, monkeypatch):
+    """
+    Announcing "I record these calls" and getting silence back is the most
+    common way consent goes missing, and the reason has to name it precisely --
+    "you announced, they did not agree" -- because the fix is a different
+    sentence in the next call, not a config change.
+    """
+    cfg, _ = build_sandbox(tmp_path, monkeypatch)
+    announced_only = Transcript(segments=[
+        Segment(0.0, 4.0, "Before we start, I record these calls for my notes. Is that okay?", "Sasson"),
+        Segment(4.0, 8.0, "So, what I have is a term policy through work.", "Marcus"),
+    ])
+
+    verdict = ComplianceGate(cfg).evaluate(_routed("insurance_agent", announced_only))
+
+    assert verdict.consent is ConsentStatus.NOT_DETECTED
+    assert verdict.allow is False
+    assert any("announced the recording but no agreement" in r for r in verdict.reasons), (
+        verdict.reasons)
+
+
 # =========================================================================
 # Nothing to check
 # =========================================================================
