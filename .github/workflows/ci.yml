@@ -81,6 +81,29 @@ jobs:
           PLAUD_BRIDGE_PASSPHRASE: ""
         run: python scripts/smoke.py
 
+  coverage:
+    name: coverage floor
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -e ".[dev]"
+
+      # "All tests pass" and "everything is tested" are different claims. This
+      # job measures the second one -- line AND branch -- and fails the build
+      # below the floor in the Makefile. The floor is the last measured value
+      # rounded down; it goes up when the measurement goes up and is never
+      # lowered to make a build pass. A drop means untested code landed.
+      - name: Line and branch coverage above the floor
+        env:
+          GROQ_API_KEY: ""
+          ANTHROPIC_API_KEY: ""
+          HUGGINGFACE_TOKEN: ""
+        run: make coverage
+
   compliance-guards:
     name: compliance guards
     runs-on: ubuntu-latest
@@ -97,7 +120,8 @@ jobs:
       # X here says "a privacy guarantee broke", not "something broke".
       - name: Local-only locks and the end-to-end privacy guarantees
         run: |
-          python -m pytest tests/test_config.py tests/test_end_to_end.py -q
+          python -m pytest tests/test_config.py tests/test_end_to_end.py \
+            tests/test_compliance_gate_edges.py -q
 
       - name: CODE_ENFORCED_LOCAL_ONLY still covers father and husband
         run: |

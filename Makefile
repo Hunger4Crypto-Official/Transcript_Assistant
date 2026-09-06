@@ -1,4 +1,4 @@
-.PHONY: help setup doctor run digest week verify review test smoke smoke-quick clean
+.PHONY: help setup doctor run digest week verify review test coverage smoke smoke-quick clean
 
 help:
 	@echo "make setup    install dependencies"
@@ -9,6 +9,7 @@ help:
 	@echo "make verify   confirm every artifact still opens"
 	@echo "make review   what the review cadence says is due"
 	@echo "make test     run the test suite"
+	@echo "make coverage the suite with line+branch coverage, failing under the floor"
 	@echo "make smoke    drive every CLI route against a throwaway project"
 	@echo "make smoke-quick  the same routes, one check each"
 	@echo "make clean    remove work scratch and caches"
@@ -39,6 +40,18 @@ review:
 
 test:
 	python -m pytest tests/ -q
+
+# Line AND branch coverage, and a floor CI enforces. The number is the last
+# measured value rounded down, never a hope: raise it when the measurement
+# rises, and never lower it to make a build pass.
+coverage:
+	python -m pytest tests/ -q --cov=src/plaud_bridge --cov-branch \
+		--cov-report=term-missing --cov-fail-under=$(COVERAGE_FLOOR)
+
+# Provisional. Line coverage measured 87%; the branch-inclusive figure was
+# still being measured when this landed, so the floor sits deliberately
+# under it. It only ever moves up from here.
+COVERAGE_FLOOR ?= 80
 
 smoke:
 	python scripts/smoke.py
