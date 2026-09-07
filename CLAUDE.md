@@ -72,20 +72,28 @@ deliberately, confirm the test fails, restore. Restore with a `cp` backup —
 
 - **Ruff clean. Every smoke route passes.** Test count and coverage move; the
   numbers below are the last measurement, and `make coverage` re-measures.
-- **Coverage is 85% line+branch** (87% line alone), not 100% — measured
-  2026-09-06: 1,228 of 9,336 statements and 446 of 3,046 branches never run.
-  CI enforces a floor of 85 (`COVERAGE_FLOOR` in the Makefile) that only
-  moves up. Raise it when the measurement rises; never lower it.
+- **Coverage is 99.32% line+branch** — measured 2026-09-07 over 1,477 tests
+  with the exact CI command: 11 of 9,345 statements and 73 of 3,048 branches
+  never run. CI enforces a floor of 99 (`COVERAGE_FLOOR` in the Makefile)
+  that only moves up. Raise it when the measurement rises; never lower it.
   - **`compliance/gate.py` is at 100% line and branch**, mutation-verified
-    (`tests/test_compliance_gate_edges.py`). It was the priority gap; closed.
-  - Very little is genuinely blocked. `http_util`, the ASR/LLM providers, and
-    the diarization engine can all be driven by loopback stub servers or an
-    injected fake module — "needs network" was an excuse, not a fact. Only
-    real model weights, real audio through Whisper, and the Windows updater
-    are unreachable here.
-  - Largest remaining gaps at last measurement: `cli.py` (256 uncovered),
-    `desktop/server.py` (79), `voiceprint.py` (76), `memory.py` (72),
-    `http_util.py` (65), `archive.py` (63), `diarize/engine.py` (53).
+    (`tests/test_compliance_gate_edges.py`).
+  - The 11 remaining statements, so nobody re-derives them: `archive.py`
+    360-368 (OSError branches inside `verify` — a file that vanishes or
+    becomes unreadable mid-check; root cannot be denied a read, so they need
+    a monkeypatched `read_bytes`); `ask.py` 440 (a defensive `continue` no
+    public path reaches — the matched segment always has text); `cli.py`
+    1420 (`speakers enroll` printing store problems on a failed save), 1783
+    (an unfiled record carrying a second, non-fallback analysis);
+    `desktop/launch.py`'s `__main__` guard is marked `pragma: no cover`.
+  - Nothing that matters is blocked by the sandbox. `http_util`, the ASR/LLM
+    providers, and the diarization engine are driven by loopback stub
+    servers and injected fake modules; the suite never touches a real
+    network. Only real model weights through Whisper and the Windows
+    updater's apply step are unreachable here.
+  - Writing the tests found three real bugs (see CHANGELOG): `review`
+    misreporting encrypted unfiled recordings, a mid-reply connection drop
+    escaping retry and failover, and a bare speaker label becoming speech.
 - Coverage measures code executed, not behavior asserted. A test that touches
   a line without asserting its effect does not count here — pin the behavior.
 
