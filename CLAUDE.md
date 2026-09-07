@@ -46,7 +46,14 @@ was argued for in an ADR or a red-team pass:
 .venv/bin/python -m pytest tests/ -q        # append: ; echo "EXIT=$?"  (unpiped!)
 .venv/bin/python -m ruff check .
 .venv/bin/python scripts/smoke.py --quick   # drives the real CLI in subprocesses
+make coverage PYTHON=.venv/bin/python       # the CI floor, line+branch (~15 min)
 ```
+
+`make` targets run bare `python`; without `PYTHON=.venv/bin/python` on a box
+where that is the system interpreter, `make coverage` dies on an unknown
+`--cov` flag before running a single test. Ruff lints Python only -- passing
+it the Makefile or a YAML file produces a wall of "syntax errors" that mean
+nothing.
 
 Piping pytest through `tail` reports the pipe's exit code, not pytest's. Always
 echo `$?` from the unpiped command.
