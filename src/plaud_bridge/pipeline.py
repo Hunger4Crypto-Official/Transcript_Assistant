@@ -758,7 +758,14 @@ class Pipeline:
 _STAMP_RE = re.compile(
     r"(\d{2}):(\d{2}):(\d{2})[,.](\d{3})\s*-->\s*(\d{2}):(\d{2}):(\d{2})[,.](\d{3})"
 )
-_SPEAKER_RE = re.compile(r"^(?P<speaker>[A-Za-z][\w .'\-]{0,30}?):\s+(?P<text>\S.*)$")
+# The second alternative admits a label with nothing after it ("Marcus:" on a
+# line of its own -- a speaker change an exporter emitted without words). It
+# used to fall through as literal text credited to SPEAKER, so the archive
+# held an utterance whose words were somebody's name. Deliberately narrow:
+# "Re:invoice" and other no-space forms still do not read as speech.
+_SPEAKER_RE = re.compile(
+    r"^(?P<speaker>[A-Za-z][\w .'\-]{0,30}?):(?:\s+(?P<text>\S.*)|\s*)$"
+)
 _TS_PREFIX_RE = re.compile(r"^\[(?P<ts>\d{1,2}:\d{2}(?::\d{2})?)\]\s*(?P<rest>.*)$")
 
 # Words that start sentences and are followed by a colon often enough to be
@@ -808,12 +815,13 @@ def _speaker_split(line: str) -> tuple[str, str] | None:
     if not match:
         return None
     speaker = match.group("speaker").strip()
+    text = match.group("text") or ""      # None when the label stands alone
     # "See https://example.com/x" is a URL, not See speaking.
-    if "//" in match.group("text")[:2] or "://" in line:
+    if "//" in text[:2] or "://" in line:
         return None
     if speaker.lower() in _NOT_A_SPEAKER or len(speaker.split()) > 4:
         return None
-    return speaker, match.group("text").strip()
+    return speaker, text.strip()
 
 
 def _confirmed_speakers(lines: list[str]) -> set[str]:
