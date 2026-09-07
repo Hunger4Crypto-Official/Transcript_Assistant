@@ -62,6 +62,10 @@ class ConsentStatus(str, Enum):
     NOT_DETECTED = "not_detected"
     NOT_REQUIRED = "not_required"
     WAIVED = "waived"
+    # A party actively objected to being recorded. Distinct from NOT_DETECTED
+    # (nobody said anything either way): a refusal quarantines unconditionally,
+    # and the stored status must be able to say which of the two happened.
+    REFUSED = "refused"
 
 
 @dataclass
@@ -72,7 +76,12 @@ class Segment:
     end: float
     text: str
     speaker: str = "SPEAKER_00"
+    # Average log probability from the recogniser. Clean speech sits above about
+    # -0.5; well below -1.0 the model is guessing at what it heard.
     confidence: float | None = None
+    # The recogniser's own probability that this span held no speech at all.
+    # High no-speech alongside fluent text is the hallucination signature.
+    no_speech: float | None = None
 
     @property
     def duration(self) -> float:
@@ -92,6 +101,7 @@ class Segment:
             text=str(d.get("text", "")),
             speaker=str(d.get("speaker", "SPEAKER_00")),
             confidence=d.get("confidence"),
+            no_speech=d.get("no_speech"),
         )
 
 
@@ -103,6 +113,9 @@ class Transcript:
     asr_model: str = ""
     duration_seconds: float = 0.0
     cost_usd: float = 0.0
+    # How much of this the recogniser appears to have been guessing at. See
+    # asr/confidence.py; empty for imported text, which has nothing to score.
+    confidence_report: dict[str, Any] = field(default_factory=dict)
 
     @property
     def text(self) -> str:
@@ -147,6 +160,7 @@ class Transcript:
             "asr_model": self.asr_model,
             "duration_seconds": self.duration_seconds,
             "cost_usd": self.cost_usd,
+            "confidence_report": self.confidence_report,
         }
 
     @classmethod
@@ -158,6 +172,7 @@ class Transcript:
             asr_model=d.get("asr_model", ""),
             duration_seconds=float(d.get("duration_seconds", 0.0)),
             cost_usd=float(d.get("cost_usd", 0.0)),
+            confidence_report=d.get("confidence_report") or {},
         )
 
 
@@ -215,6 +230,9 @@ class ProfileAnalysis:
     llm_model: str = ""
     cost_usd: float = 0.0
     requires_human_attention: bool = False
+    # Quotes the model attributed to somebody that were not actually in the
+    # transcript it was given, and were therefore dropped. See extractor.py.
+    unverified_quotes: int = 0
     error: str = ""
 
     def to_dict(self) -> dict[str, Any]:
@@ -300,6 +318,19 @@ class Recording:
                 "duration_seconds": self.transcript.duration_seconds,
                 "cost_usd": self.transcript.cost_usd,
                 "speakers": self.transcript.speakers,
+                # Whether the transcript is trustworthy is metadata about it,
+                # not content, and the digest reads the index rather than
+                # opening the vault -- so dropping this would mean the one
+                # warning that has to be read before the summary is the one
+                # warning an encrypted recording never shows.
+                #
+                # `worst` is the exception: those are verbatim passages, and a
+                # sample of a maximum-sensitivity conversation sitting in a
+                # plain file is the thing this whole method exists to prevent.
+                "confidence_report": {
+                    k: v for k, v in (self.transcript.confidence_report or {}).items()
+                    if k != "worst"
+                },
             }
 
         analyses: list[dict[str, Any]] = []
@@ -309,6 +340,24 @@ class Recording:
                 entry["fields"] = {}
                 entry["fields_withheld"] = True
             analyses.append(entry)
+
+        # Withholding the transcript segments is not enough. Three other fields
+        # are lifted verbatim from the transcript and would otherwise ride into
+        # the plain-file index in the clear for an encrypted recording: the
+        # consent quote, and the router's short "evidence" phrases both on the
+        # top-level routes and inside each episode's routes. A red-team pass
+        # read a client's own words straight out of bridge.db this way. When the
+        # transcript is withheld, these are withheld with it.
+        compliance = self.compliance.to_dict()
+        routes = [r.to_dict() for r in self.routes]
+        episodes = [e.to_dict() for e in self.episodes]
+        if not include_transcript:
+            compliance.pop("consent_quote", None)
+            for route in routes:
+                route.pop("evidence", None)
+            for episode in episodes:
+                for route in episode.get("routes", []):
+                    route.pop("evidence", None)
 
         return {
             "id": self.id,
@@ -322,9 +371,9 @@ class Recording:
             "stage": self.stage.value,
             "duration_seconds": self.duration_seconds,
             "transcript": transcript,
-            "routes": [r.to_dict() for r in self.routes],
-            "episodes": [e.to_dict() for e in self.episodes],
-            "compliance": self.compliance.to_dict(),
+            "routes": routes,
+            "episodes": episodes,
+            "compliance": compliance,
             "analyses": analyses,
             "total_cost_usd": self.total_cost_usd,
             "errors": self.errors,

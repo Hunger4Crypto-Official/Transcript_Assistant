@@ -3,23 +3,34 @@
 Plaud Bridge command line.
 
     plaud-bridge doctor                        preflight every dependency and key
+    plaud-bridge demo                          fill it with samples to explore
+    plaud-bridge app                           the local app, from the terminal
     plaud-bridge run                           process everything in the inbox
     plaud-bridge watch                         keep processing on an interval
     plaud-bridge digest                        combined digest, last 7 days
     plaud-bridge digest --format html          self-contained page, prints cleanly
+    plaud-bridge brief                         the week in one memo, with receipts
     plaud-bridge review                        what the review cadence says is due
+    plaud-bridge followups                     commitments still open, oldest first
+    plaud-bridge insights                      how you talk: share, pace, questions
     plaud-bridge status                        index summary
     plaud-bridge search "own occupation" --content    search what was actually said
+    plaud-bridge ask "what did I promise Marcus?"      answer it, with citations
     plaud-bridge open <recording_id>           decrypt and print an artifact
     plaud-bridge verify                        confirm every artifact still opens
     plaud-bridge export                        redacted document for someone else
     plaud-bridge forget <recording_id>         delete one recording, permanently
+    plaud-bridge memory                        what it has learned across recordings
+    plaud-bridge people                        everyone it has heard, by name
     plaud-bridge audit                         read the compliance audit log
     plaud-bridge release <recording_id>        release a quarantined recording
+    plaud-bridge quarantine                    triage everything in quarantine at once
     plaud-bridge retention --execute           delete expired artifacts
     plaud-bridge profiles                      show the routing table
     plaud-bridge new-profile <id>              scaffold a profile from the template
     plaud-bridge voices                        show installed voice packs
+    plaud-bridge speakers enroll "Marcus" --audio clip.wav   teach it a voice
+    plaud-bridge speakers identify <audio>     score a recording without writing anything
 
 `python run.py <command>` runs the same code without installing anything.
 """
@@ -34,12 +45,20 @@ from pathlib import Path
 
 from . import __version__
 from .archive import Archive
+from .ask import ask, save_answer
+from .brief import build_brief
+from .brief import render as render_brief
 from .compliance import RetentionSweeper
 from .config import Config, ConfigError
 from .db import Database
 from .digest import DigestBuilder, DigestOptions, fmt_value, to_html
+from .followups import FollowUpError, collect, draft, render, set_status
+from .insights import InsightsError, recording_metrics, render_recording, render_trend
+from .insights import trend as insights_trend
 from .logging_setup import setup
+from .memory import MemoryStore, carry_forward_brief, render_ledger
 from .models import format_stamp
+from .people import PeopleError, collect_people, person_detail, render_person, render_roster
 from .pipeline import Pipeline
 from .storage import Vault, VaultError
 from .voice import Voice
@@ -118,6 +137,23 @@ def cmd_doctor(args) -> int:
     ok, why = diar_available(cfg)
     rows.append((OK if ok else WARN, "diarization", why if ok else why + " (speaker labels off)"))
 
+    # named speakers
+    from .diarize.voiceprint import Embedder, VoiceprintError, VoiceprintStore
+
+    ok, why = Embedder.available(cfg)
+    rows.append((OK if ok else WARN, "speakers:model",
+                 why if ok else why + " (speakers stay numbered)"))
+    try:
+        enrolled = VoiceprintStore(Vault(cfg.path("vault"))).people()
+        rows.append((
+            OK if enrolled else WARN, "speakers:enrolled",
+            ", ".join(p.name for p in enrolled) if enrolled
+            else 'nobody enrolled yet (run.py speakers enroll "Name" --audio clip.wav)',
+        ))
+    except (VoiceprintError, VaultError) as exc:
+        rows.append((BAD, "speakers:enrolled", str(exc).splitlines()[0]))
+        fatal = True
+
     # LLM
     from .llm.registry import build_llm_chain
 
@@ -139,6 +175,20 @@ def cmd_doctor(args) -> int:
         else "not configured. father/husband analysis will fail by design, not by accident. "
              "Enable llm.local in pipeline.yaml.",
     ))
+    rows.append((
+        OK if any_llm else WARN, "ask",
+        "ready" if any_llm else
+        "no usable LLM: `ask` returns ranked excerpts instead of answers, which "
+        "still beats `search --content` but is not an answer",
+    ))
+
+    # memory
+    memory_ok, memory_why = MemoryStore(cfg).ready()
+    rows.append((
+        OK if memory_ok else WARN, "memory",
+        "ready" if memory_ok
+        else f"{memory_why} Nothing will be carried forward between recordings.",
+    ))
 
     # offline readiness
     from .runtime import cloud_providers_enabled, is_offline, model_path, resolve_local_model
@@ -159,6 +209,7 @@ def cmd_doctor(args) -> int:
         for label, configured, subdir in (
             ("asr", cfg.get("asr.local.model", "large-v3"), "whisper"),
             ("diarization", cfg.get("diarization.pyannote.model", ""), "diarization"),
+            ("speakers", cfg.get("diarization.identify.model", ""), "diarization"),
         ):
             if not configured:
                 continue
@@ -222,6 +273,8 @@ def cmd_run(args) -> int:
         if stats.quarantined:
             print(f"\n{stats.quarantined} recording(s) quarantined. See "
                   f"{cfg.path('quarantine')} for why.")
+            print("Triage them together with `python run.py quarantine` "
+                  "(then --release-all / --forget-all).")
         if stats.failed:
             print(f"{stats.failed} recording(s) failed. Check the log at "
                   f"{cfg.path('logs') / 'bridge.log'}")
@@ -277,17 +330,192 @@ def cmd_digest(args) -> int:
             max_items=int(cfg.get("digest.max_items_per_section", 40)),
             title=args.title or "",
         )
-        markdown = DigestBuilder(cfg, db).render_markdown(opts)
+        builder = DigestBuilder(cfg, db)
 
-        # HTML is rendered from the markdown rather than from the section data,
-        # so the two formats cannot drift into saying different things.
+        # HTML is still rendered from the markdown — with charts layered on
+        # top — so the two formats cannot drift into saying different things.
         if args.format == "html":
             title = opts.title or (
                 cfg.profile(opts.profile_id).name if opts.profile_id else "Digest"
             )
-            body = to_html(markdown, title=title)
+            body = builder.render_html(opts, title=title)
         else:
-            body = markdown
+            body = builder.render_markdown(opts)
+
+        if args.out:
+            dest = Path(args.out)
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_text(body, encoding="utf-8")
+            print(f"wrote {dest}")
+        else:
+            print(body)
+        return 0
+    finally:
+        db.close()
+
+
+def cmd_brief(args) -> int:
+    """
+    The week, synthesised across the archive, with a receipt on every claim.
+
+    The digest is per-recording sections; this is what an aide who read all of
+    them would hand you. With no model reachable the deterministic skeleton is
+    the brief, clearly labelled as assembled rather than narrated, and that is
+    an exit 0 -- a memo built entirely from real data is a success.
+    """
+    cfg = _load(args)
+    db = Database(cfg.path("database"))
+    try:
+        archive = Archive(cfg, db)
+        brief = build_brief(
+            cfg, db, archive,
+            days=args.days if args.days is not None
+                 else int(cfg.get("brief.default_window_days", 7)),
+            include_personal=args.include_personal,
+            vault=archive.vault,
+        )
+        body = render_brief(brief, fmt=args.format)
+        if args.out:
+            dest = Path(args.out)
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_text(body, encoding="utf-8")
+            print(f"wrote {dest}")
+        else:
+            print(body)
+        return 0
+    finally:
+        db.close()
+
+
+def cmd_followups(args) -> int:
+    """
+    Commitments across every recording, and drafts for the ones you chase.
+
+    Nothing here sends anything. `--draft` writes a file into the outbox for
+    you to read, edit, and send from your own mail client, which is the whole
+    difference between this and the feature it replaces.
+    """
+    cfg = _load(args)
+    db = Database(cfg.path("database"))
+    try:
+        archive = Archive(cfg, db)
+        try:
+            items = collect(
+                cfg, db, archive,
+                profile=args.profile,
+                days=args.days,
+                status=None if args.status == "all" else args.status,
+                include_personal=args.include_personal,
+                vault=archive.vault,
+            )
+
+            for followup_id, status in ((args.done, "done"), (args.drop, "dropped"),
+                                        (args.reopen, "open")):
+                if not followup_id:
+                    continue
+                updated = set_status(cfg, archive.vault, followup_id, status, items=items)
+                print(f"{updated.id} is now {status}"
+                      + (f": {updated.text}" if updated.text else ""))
+                return 0
+
+            if args.draft:
+                # A recording id drafts everything that recording still owes,
+                # a follow-up id drafts one thing, and 'open' drafts the lot.
+                if args.draft.startswith("rec_"):
+                    target = args.draft
+                elif args.draft == "open":
+                    target = [i for i in items if i.is_open]
+                else:
+                    target = [i for i in items if i.id.startswith(args.draft)]
+                    if not target:
+                        print(f"no follow-up here starts with '{args.draft}'")
+                        return 1
+                path = draft(
+                    target, cfg, db=db, archive=archive, vault=archive.vault,
+                    out=args.out, fmt="text" if args.format == "text" else "markdown",
+                    include_personal=args.include_personal,
+                )
+                print(f"\nwrote {path}")
+                print("That is a draft. Nothing has been sent, and this tool has no "
+                      "way to send it. Read it, fix it, and send it yourself.\n")
+                return 0
+        except FollowUpError as exc:
+            print(f"\n{exc}\n", file=sys.stderr)
+            return 1
+
+        body = render(items, fmt="html" if args.format == "html" else "markdown",
+                      title=args.title or None)
+        if args.out:
+            dest = Path(args.out)
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_text(body, encoding="utf-8")
+            print(f"wrote {dest}")
+        else:
+            print(body)
+        return 0
+    finally:
+        db.close()
+
+
+def cmd_insights(args) -> int:
+    """
+    Conversation metrics, derived on demand from the stored segments.
+
+    No model and no storage: everything printed here is arithmetic the reader
+    can check against `open <id>`, and there is no cache for `forget` to miss.
+    Exit 2 means the numbers are honest but incomplete -- some recordings
+    would not open -- which is the same convention `search --content` uses.
+    """
+    cfg = _load(args)
+    db = Database(cfg.path("database"))
+    try:
+        archive = Archive(cfg, db)
+        try:
+            if args.recording:
+                print(render_recording(recording_metrics(cfg, db, archive, args.recording)))
+                return 0
+            report = insights_trend(
+                cfg, db, archive,
+                profile=args.profile, days=args.days,
+                include_personal=args.include_personal,
+            )
+        except InsightsError as exc:
+            print(f"\n{exc}\n", file=sys.stderr)
+            return 2 if exc.unopened else 1
+        print(render_trend(report))
+        return 2 if report.unopened else 0
+    finally:
+        db.close()
+
+
+def cmd_people(args) -> int:
+    """
+    Everyone the archive has heard, or one person's whole page.
+
+    Read-only. The roster is built from artifacts already on disk, and the
+    honesty rules live in `people.py`: a speaker label is attribution rather
+    than verified identity, placeholders are bucketed rather than personified,
+    and personal recordings stay out unless asked for by flag.
+    """
+    cfg = _load(args)
+    db = Database(cfg.path("database"))
+    try:
+        archive = Archive(cfg, db)
+        fmt = "html" if args.format == "html" else "markdown"
+        try:
+            people = collect_people(
+                cfg, db, archive,
+                include_personal=args.include_personal,
+                days=args.days,
+                vault=archive.vault,
+            )
+            if args.name:
+                body = render_person(person_detail(people, args.name), fmt=fmt)
+            else:
+                body = render_roster(people, fmt=fmt, title=args.title or None)
+        except PeopleError as exc:
+            print(f"\n{exc}\n", file=sys.stderr)
+            return 1
 
         if args.out:
             dest = Path(args.out)
@@ -310,6 +538,12 @@ def cmd_status(args) -> int:
         print(f"  recordings   {stats['recordings']}")
         print(f"  audio hours  {stats['audio_hours']}")
         print(f"  api spend    ${stats['total_cost_usd']}")
+        if stats["by_source"]:
+            # Asking questions and phrasing drafts cost money too, and it used
+            # to be spent without appearing anywhere a person would look.
+            print(f"    pipeline   ${stats['pipeline_cost_usd']}")
+            for source, entry in sorted(stats["by_source"].items()):
+                print(f"    {source:10s} ${entry['cost_usd']}  ({entry['calls']} call(s))")
         print("\n  by profile")
         for pid, count in sorted(stats["by_profile"].items(), key=lambda kv: -kv[1]):
             name = cfg.profiles[pid].name if pid in cfg.profiles else pid
@@ -355,6 +589,18 @@ def _search_content(cfg, db, args) -> int:
     )
     matches, unopened = result.matches, result.unopened
 
+    def _say_quarantined() -> None:
+        if not result.quarantined:
+            return
+        print(f"{len(result.quarantined)} recording(s) are quarantined and hold no "
+              f"searchable content:")
+        for entry in result.quarantined[:20]:
+            print(f"  {entry}")
+        if len(result.quarantined) > 20:
+            print(f"  ... and {len(result.quarantined) - 20} more")
+        print("  The gate stopped these before anything was stored. Review them and, "
+              "if they are fine,\n  run.py release <id> to put them back in the inbox.\n")
+
     if not matches and not unopened:
         print(f'\nnothing matching "{args.query}" was said in the '
               f'{result.scanned} recording(s) searched')
@@ -364,6 +610,7 @@ def _search_content(cfg, db, args) -> int:
             print()
             return 2
         print()
+        _say_quarantined()
         return 0
 
     by_recording: dict[str, list] = {}
@@ -397,7 +644,61 @@ def _search_content(cfg, db, args) -> int:
         if len(unopened) > 20:
             print(f"  ... and {len(unopened) - 20} more")
         print("  Set PLAUD_BRIDGE_PASSPHRASE if these are encrypted.\n")
+    _say_quarantined()
     return 0 if result.complete else 2
+
+
+def cmd_ask(args) -> int:
+    """
+    Answer a question from what was actually said, with citations.
+
+    Exits 2 when the answer is incomplete -- a recording would not open, the
+    scan was bounded, the context budget cut material, or a citation had to be
+    dropped. Same reasoning as `search --content`: an answer you would read
+    differently having seen the caveat should not look like a clean run to
+    whatever called it.
+    """
+    cfg = _load(args)
+    db = Database(cfg.path("database"))
+    try:
+        answer = ask(
+            args.question, cfg, db, Archive(cfg, db),
+            profile=args.profile,
+            days=args.days,
+            limit=args.limit,
+            include_personal=args.include_personal,
+            local_only=True if args.local_only else None,
+        )
+        print()
+        print(answer.render())
+        print()
+
+        if args.save:
+            try:
+                print(f"saved, encrypted: {save_answer(answer, cfg)}\n")
+            except VaultError as exc:
+                # The answer has already been printed, so nothing is lost by
+                # refusing to write it. Saying so and failing is the point: a
+                # silent non-write is how you discover months later that
+                # nothing was ever kept.
+                print(f"NOT saved: {exc}\n")
+                return 1
+
+        if answer.usage_error:
+            return 1
+
+        # "Nothing in the archive matched" is a complete answer that happens to
+        # be nothing, and `search --content` returns 0 for exactly that. What
+        # earns a 2 is an answer the archive could not fully support: excerpts
+        # returned because no model was reachable, a recording that would not
+        # open, a citation dropped, or context trimmed to fit.
+        incomplete = bool(
+            (answer.degraded and answer.bundle_chars)
+            or answer.unopened or answer.dropped_citations or answer.truncated
+        )
+        return 2 if incomplete else 0
+    finally:
+        db.close()
 
 
 def cmd_verify(args) -> int:
@@ -435,15 +736,30 @@ def cmd_forget(args) -> int:
             print(f"  {path}")
         if not targets:
             print("  (no files on disk; the index entry will be removed)")
-        print("\nThe audit log keeps a record that this was deleted. Nothing else survives.")
+        print(
+            "\nThis removes the files above, the index entry, and the memory, "
+            "follow-up, and saved-answer traces. The audit log keeps a record "
+            "that the deletion happened. It cannot reach a digest or export you "
+            "saved elsewhere yourself -- delete those where you put them."
+        )
 
         if not args.yes and not _confirm("\nType FORGET to confirm: ", "FORGET"):
             return 1
 
+        # Archive.forget is the single destructive path: it removes the files,
+        # the index row, and every derived store that carried the recording's
+        # words -- the memory ledgers, saved answers, and follow-up state. It
+        # refuses the whole operation when the vault is locked, rather than
+        # deleting the plaintext half and stranding the rest.
         removed, failures = Archive(cfg, db).forget(args.recording_id)
-        print(f"\ndeleted {removed} file(s) and the index entry")
+        if db.load(args.recording_id) is not None:
+            # The index row is still there, so nothing was deleted: the vault
+            # was locked and the operation was refused whole.
+            print("\nnothing was deleted")
+        else:
+            print(f"\ndeleted {removed} file(s) and the index entry")
         for failure in failures:
-            print(f"  could not delete {failure}")
+            print(f"  {failure}")
         return 1 if failures else 0
     finally:
         db.close()
@@ -742,6 +1058,33 @@ def cmd_audit(args) -> int:
         db.close()
 
 
+def _quarantine_media(cfg, recording_id: str) -> list[Path]:
+    """The held files a release would move. WHY.md stays; it is ours, not media."""
+    qdir = cfg.path("quarantine") / recording_id
+    if not qdir.is_dir():
+        return []
+    return [p for p in qdir.iterdir() if p.name != "WHY.md"]
+
+
+def _release_media(cfg, db, recording_id: str,
+                   detail: str = "released after human review") -> list[Path]:
+    """
+    The one release path: copy the held media back into the inbox and audit it.
+
+    Both `release <id>` and `quarantine --release-all` end here, so a bulk
+    release cannot quietly come to mean something different from a single one
+    -- same destination, same audit action, same actor.
+    """
+    inbox = cfg.path("inbox")
+    released: list[Path] = []
+    for path in _quarantine_media(cfg, recording_id):
+        dest = inbox / path.name
+        dest.write_bytes(path.read_bytes())
+        released.append(dest)
+    db.audit("quarantine_release", detail, recording_id, actor="human")
+    return released
+
+
 def cmd_release(args) -> int:
     """Move a quarantined file back to the inbox after human review."""
     cfg = _load(args)
@@ -751,27 +1094,278 @@ def cmd_release(args) -> int:
         if not qdir.is_dir():
             print(f"no quarantine folder for {args.recording_id}")
             return 1
-        media = [p for p in qdir.iterdir() if p.name != "WHY.md"]
-        if not media:
+        if not _quarantine_media(cfg, args.recording_id):
             print("quarantine folder has no media to release")
             return 1
 
         if not args.yes:
-            print(f"\nAbout to release {len(media)} file(s) back to the inbox.\n")
+            print(f"\nAbout to release "
+                  f"{len(_quarantine_media(cfg, args.recording_id))} file(s) back to the inbox.\n")
             print((qdir / "WHY.md").read_text(encoding="utf-8"))
             if not _confirm("Type RELEASE to confirm you verified consent: ", "RELEASE"):
                 return 1
 
-        inbox = cfg.path("inbox")
-        for path in media:
-            dest = inbox / path.name
-            dest.write_bytes(path.read_bytes())
+        for dest in _release_media(cfg, db, args.recording_id):
             print(f"released -> {dest}")
 
-        db.audit("quarantine_release", "released after human review", args.recording_id, actor="human")
         print("\nRe-run `python run.py run --force` to process it.")
         print("The release is recorded in the audit log.")
         return 0
+    finally:
+        db.close()
+
+
+# ---- quarantine triage --------------------------------------------------
+#
+# A backlog run can quarantine dozens of recordings at once, correctly, and
+# the per-recording tools (`release <id>`, WHY.md files read one at a time) do
+# not scale to that without turning review into a rubber stamp. This surface
+# lists everything in quarantine with the reason distilled, and offers bulk
+# release and bulk forget behind the same typed-confirmation discipline that
+# `forget` uses. The one thing it refuses to scale is a refusal: a recording
+# whose verdict shows a party objecting is never part of --release-all, and
+# releasing it stays a one-at-a-time act on purpose.
+
+_RELEASE_ALL_PHRASE = "RELEASE ALL"
+_FORGET_ALL_PHRASE = "FORGET ALL"
+
+# Reason classes, in the order the listing shows them. Refusals come first
+# because they are the rows a person must not skim past.
+_CLASS_REFUSAL = "refusal"
+_CLASS_STATIC_GATE = "static-gate"
+_CLASS_NO_ANNOUNCEMENT = "no-announcement"
+
+_CLASS_TITLES = {
+    _CLASS_STATIC_GATE: "Standing consent gate is off",
+    _CLASS_NO_ANNOUNCEMENT: "No consent announcement detected",
+}
+
+
+def _classify_verdict(consent_status: str, reasons: list[str]) -> tuple[str, str]:
+    """
+    (class, one-line reason) distilled from a stored compliance verdict.
+
+    Refusal is checked first because it can co-occur with everything else and
+    must win: it is the one class policy forbids releasing in bulk. The text
+    matches are against sentences this codebase writes itself (gate.py and
+    consent.py), which is what makes matching on them safe; the consent_status
+    column is still consulted first so an index row alone is enough.
+    """
+    joined = " ".join(reasons)
+    if consent_status == "refused" or "objected to being recorded" in joined:
+        return _CLASS_REFUSAL, "a party objected to being recorded"
+    if "set to false" in joined:
+        line = next((r for r in reasons if "set to false" in r), "")
+        return _CLASS_STATIC_GATE, (line.split(". ")[0] or "standing consent gate is off")
+    # Whatever the consent detector noted is more specific than the boilerplate
+    # around it, so keep the first reason that is not scaffolding.
+    boilerplate = ("QUARANTINED", "local-only processing", "governs the whole recording")
+    for reason in reasons:
+        if not any(marker in reason for marker in boilerplate):
+            return _CLASS_NO_ANNOUNCEMENT, reason.split(". ")[0][:110]
+    return _CLASS_NO_ANNOUNCEMENT, "no consent announcement detected"
+
+
+def _reasons_from_why(qdir: Path) -> list[str]:
+    """The WHY.md bullets, for a folder whose index row is gone."""
+    try:
+        text = (qdir / "WHY.md").read_text(encoding="utf-8")
+    except OSError:
+        return []
+    reasons, in_reasons = [], False
+    for line in text.splitlines():
+        if line.startswith("## "):
+            in_reasons = line.strip() == "## Reasons"
+            continue
+        if in_reasons and line.startswith("- "):
+            reasons.append(line[2:].strip())
+    return reasons
+
+
+def _quarantine_entries(cfg, db) -> list[dict]:
+    """
+    Everything currently held in quarantine, with the reason distilled.
+
+    The quarantine directory is the ground truth for what can be released --
+    `release` moves files, not index rows -- but the index and the audit log
+    know things the folder does not: which verdict put it there, when, and
+    whether a human already released it. So this reads all three, and also
+    reports index rows whose folder has gone missing rather than pretending
+    the index is wrong.
+    """
+    qroot = cfg.path("quarantine")
+    ids: list[str] = []
+    if qroot.is_dir():
+        ids = sorted(p.name for p in qroot.iterdir() if p.is_dir())
+    for row in db.query(stage="quarantined", limit=10_000):
+        if row["id"] not in ids:
+            ids.append(row["id"])
+
+    entries: list[dict] = []
+    for rid in ids:
+        payload = db.load(rid) or {}
+        verdict = payload.get("compliance") or {}
+        reasons = list(verdict.get("reasons") or []) or _reasons_from_why(qroot / rid)
+        klass, reason = _classify_verdict(str(verdict.get("consent", "")), reasons)
+
+        held = db.audit_log(recording_id=rid, action="quarantine", limit=1)
+        when = (held[0]["at"] if held else payload.get("ingested_at") or "")[:16].replace("T", " ")
+        entries.append({
+            "id": rid,
+            "source": payload.get("source_name")
+                      or next((p.name for p in _quarantine_media(cfg, rid)), "(unknown source)"),
+            "when": when or "(unknown time)",
+            "klass": klass,
+            "reason": reason,
+            "media": _quarantine_media(cfg, rid),
+            "released": bool(db.audit_log(recording_id=rid, action="quarantine_release", limit=1)),
+        })
+    entries.sort(key=lambda e: e["when"])
+    return entries
+
+
+def _print_entry(entry: dict) -> None:
+    note = ""
+    if entry["released"]:
+        note = "  (already released; re-run `run.py run --force` to process it)"
+    elif not entry["media"]:
+        note = "  (folder has no media; releasable never, forgettable always)"
+    print(f"  {entry['id']}  {entry['when']}  {entry['source']}{note}")
+    print(f"      {entry['reason']}")
+
+
+def _quarantine_list(cfg, entries: list[dict]) -> int:
+    if not entries:
+        print("\nquarantine is empty\n")
+        return 0
+
+    refusals = [e for e in entries if e["klass"] == _CLASS_REFUSAL]
+    print(f"\n{len(entries)} recording(s) in quarantine :: {cfg.path('quarantine')}\n")
+
+    if refusals:
+        print(f"REFUSED -- a party said no ({len(refusals)}). "
+              "Never included in --release-all:")
+        for entry in refusals:
+            _print_entry(entry)
+        print("  A refusal is releasable only one at a time, `run.py release <id>`, after")
+        print("  you have listened and are certain the objection is not what it reads as.")
+        print("  Deleting these is the expected outcome, not an inconvenience.\n")
+
+    for klass, title in _CLASS_TITLES.items():
+        group = [e for e in entries if e["klass"] == klass]
+        if not group:
+            continue
+        print(f"{title} ({len(group)}):")
+        for entry in group:
+            _print_entry(entry)
+        print()
+
+    print("Full stored verdicts are in each folder's WHY.md.")
+    print("One at a time:  run.py release <id>   /  run.py forget <id>")
+    print("In bulk:        run.py quarantine --release-all   (refusals stay put)")
+    print("                run.py quarantine --forget-all    (deletes every trace)\n")
+    return 0
+
+
+def _quarantine_release_all(cfg, db, entries: list[dict], yes: bool) -> int:
+    refusals = [e for e in entries if e["klass"] == _CLASS_REFUSAL]
+    eligible = [e for e in entries
+                if e["klass"] != _CLASS_REFUSAL and e["media"] and not e["released"]]
+
+    if refusals:
+        print(f"\n{len(refusals)} recording(s) hold an explicit refusal and are "
+              "EXCLUDED from this bulk release:")
+        for entry in refusals:
+            _print_entry(entry)
+        print("  A refusal means the other party answered the consent question, and the")
+        print("  answer was no. Bulk release exists for recordings where nobody asked on")
+        print("  tape; it must never wave through one where somebody said no. If you are")
+        print("  certain a refusal was misread, release it alone: run.py release <id>.")
+        print("  That friction is the point.")
+
+    if not eligible:
+        already = [e for e in entries if e["released"]]
+        print("\nnothing eligible for bulk release"
+              + (f" ({len(already)} already released)" if already else "")
+              + ("" if entries else "; quarantine is empty"))
+        print()
+        return 0
+
+    print(f"\nAbout to release {len(eligible)} recording(s) back to the inbox:\n")
+    for entry in eligible:
+        _print_entry(entry)
+    print("\nReleasing is an affirmation, for EVERY recording above, that you verified")
+    print("consent was actually obtained even though the gate could not hear it --")
+    print("not a way to empty a folder. Each release is written to the audit log.")
+
+    if not yes and not _confirm(
+        f"\nType {_RELEASE_ALL_PHRASE} to confirm you verified consent for all of them: ",
+        _RELEASE_ALL_PHRASE,
+    ):
+        return 1
+
+    print()
+    for entry in eligible:
+        for dest in _release_media(
+            cfg, db, entry["id"],
+            detail="released after human review (quarantine --release-all)",
+        ):
+            print(f"released -> {dest}")
+
+    print(f"\nreleased {len(eligible)} recording(s)"
+          + (f"; {len(refusals)} refusal(s) stay quarantined" if refusals else ""))
+    print("Re-run `python run.py run --force` to process them.")
+    print("Every release is recorded in the audit log.")
+    return 0
+
+
+def _quarantine_forget_all(cfg, db, entries: list[dict], yes: bool) -> int:
+    if not entries:
+        print("\nquarantine is empty; nothing to forget\n")
+        return 0
+
+    archive = Archive(cfg, db)
+    print(f"\nAbout to permanently delete {len(entries)} quarantined recording(s), "
+          "their index entries, and every derived trace:\n")
+    for entry in entries:
+        targets = archive.plan_forget(entry["id"])
+        print(f"  {entry['id']}  {entry['source']}  ({len(targets)} file(s))")
+    print("\nThe audit log keeps a record that each deletion happened. Nothing else survives.")
+
+    if not yes and not _confirm(
+        f"\nType {_FORGET_ALL_PHRASE} to confirm: ", _FORGET_ALL_PHRASE,
+    ):
+        return 1
+
+    removed_total, failures_total = 0, []
+    for entry in entries:
+        removed, failures = archive.forget(entry["id"])
+        removed_total += removed
+        failures_total.extend(failures)
+
+    print(f"\ndeleted {removed_total} file(s) across {len(entries)} recording(s)")
+    for failure in failures_total:
+        print(f"  {failure}")
+    return 1 if failures_total else 0
+
+
+def cmd_quarantine(args) -> int:
+    """
+    Triage the quarantine folder as a whole.
+
+    The default is the read-only listing; the two bulk verbs sit behind the
+    same typed-confirmation discipline as `forget`, and --release-all excludes
+    explicit refusals unconditionally.
+    """
+    cfg = _load(args)
+    db = Database(cfg.path("database"))
+    try:
+        entries = _quarantine_entries(cfg, db)
+        if args.release_all:
+            return _quarantine_release_all(cfg, db, entries, yes=args.yes)
+        if args.forget_all:
+            return _quarantine_forget_all(cfg, db, entries, yes=args.yes)
+        return _quarantine_list(cfg, entries)
     finally:
         db.close()
 
@@ -797,6 +1391,51 @@ def cmd_retention(args) -> int:
         db.close()
 
 
+def cmd_memory(args) -> int:
+    """
+    What this tool has learned across recordings, per profile.
+
+    Read-only unless you ask otherwise. `--rebuild` throws the ledgers away and
+    replays the archive: slower, and the answer to believe whenever the ledger
+    and the archive disagree.
+    """
+    cfg = _load(args)
+    if args.profile and args.profile not in cfg.profiles:
+        print(f"unknown profile '{args.profile}'. Known: {sorted(cfg.profiles)}")
+        return 1
+
+    db = Database(cfg.path("database"))
+    try:
+        store = MemoryStore(cfg)
+
+        if args.forget:
+            changed = store.forget_recording(args.forget)
+            print(f"\nremoved {args.forget} from {len(changed)} ledger(s)"
+                  + (f": {', '.join(changed)}" if changed else ""))
+        elif args.rebuild:
+            report = store.rebuild(db, Archive(cfg, db), force=args.force)
+            print("\n" + report.render())
+            if not report.saved:
+                for problem in store.problems:
+                    print(f"\n  {problem}", file=sys.stderr)
+                return 1
+
+        for pid in ([args.profile] if args.profile else sorted(cfg.profiles)):
+            if args.brief:
+                brief = carry_forward_brief(cfg, pid, store)
+                if brief:
+                    print(f"\n----- {pid} -----\n{brief}")
+            else:
+                print("\n" + render_ledger(store.ledger(pid), cfg=cfg))
+
+        for problem in store.problems:
+            print(f"\n  {problem}", file=sys.stderr)
+        print()
+        return 1 if store.problems else 0
+    finally:
+        db.close()
+
+
 def cmd_new_profile(args) -> int:
     """Scaffold a profile from the documented template."""
     cfg_dir = Path(args.config)
@@ -816,12 +1455,19 @@ def cmd_new_profile(args) -> int:
         return 1
 
     name = args.name or pid.replace("_", " ").title()
+    # These come from the command line and land inside quoted YAML scalars, so a
+    # value containing a quote, a colon, or a newline would break out and inject
+    # structure -- or, more likely for a value the user typed themselves, just
+    # write a file that no longer parses. json.dumps produces a correctly escaped
+    # double-quoted scalar that is also valid YAML, which keeps the templated
+    # values safe without discarding the template's comments the way re-dumping
+    # the whole thing would. `pid` is already validated as an identifier.
     body = (
         template.read_text(encoding="utf-8")
         .replace('id: "PROFILE_ID"', f'id: {pid}')
-        .replace('name: "Profile Name"', f'name: "{name}"')
-        .replace('short_name: "Short"', f'short_name: "{args.short_name or name}"')
-        .replace('heading: "Section Heading"', f'heading: "{args.heading or name}"')
+        .replace('name: "Profile Name"', f'name: {json.dumps(name)}')
+        .replace('short_name: "Short"', f'short_name: {json.dumps(args.short_name or name)}')
+        .replace('heading: "Section Heading"', f'heading: {json.dumps(args.heading or name)}')
     )
     dest.write_text(body, encoding="utf-8")
 
@@ -854,6 +1500,171 @@ def cmd_voices(args) -> int:
     print("\nSet voice.preset in pipeline.yaml to switch. Override individual")
     print("strings with voice.overrides without copying a whole pack.\n")
     return 0
+
+
+def _speakers_store(cfg):
+    from .diarize.voiceprint import VoiceprintStore
+
+    return VoiceprintStore(Vault(cfg.path("vault")))
+
+
+def _prepared_audio(cfg, src: Path, work_dir: Path) -> Path:
+    """
+    Enrollment and identification want the same 16k mono wav the pipeline uses.
+
+    An enrollment clip recorded on a phone and a recording exported from the
+    device should produce comparable vectors, and they will not if one of them
+    is a 44.1k stereo mp3.
+    """
+    from .audio import AudioPreparer
+
+    normalised, _duration = AudioPreparer(cfg).normalise(src, work_dir)
+    return normalised
+
+
+def cmd_speakers(args) -> int:
+    """
+    Enroll, list, test, and forget the voices this archive can name.
+
+    Split into sub-commands because these are four genuinely different verbs
+    with different consequences, and `speakers forget` deleting a voiceprint
+    should not share a flag namespace with `speakers enroll` creating one.
+    """
+    cfg = _load(args)
+    cfg.ensure_dirs()
+    from .audio import AudioError
+    from .diarize.voiceprint import Embedder, VoiceprintError, identify
+
+    action = args.speakers_action
+    store = _speakers_store(cfg)
+
+    try:
+        # ---- list --------------------------------------------------------
+        if action == "list":
+            people = store.people()
+            if not people:
+                print("\nNobody is enrolled, so every speaker stays numbered.\n")
+                print('  run.py speakers enroll "Marcus" --audio clips/marcus.wav\n')
+                return 0
+            print(f"\n{len(people)} enrolled voice(s), encrypted in {store.path}\n")
+            for person in people:
+                sources = ", ".join(s.source for s in person.samples if s.source)
+                print(f"  {person.name:24s} {len(person.samples)} sample(s), "
+                      f"{person.seconds:.0f}s, updated {person.updated_at[:10]}")
+                if sources:
+                    print(f"  {'':24s} from {sources}")
+            print("\nThreshold and margin live under diarization.identify in pipeline.yaml.")
+            print("Run `speakers identify <audio>` to see the actual scores before changing them.\n")
+            return 0
+
+        # ---- forget ------------------------------------------------------
+        if action == "forget":
+            person = store.find(args.name)
+            if person is None:
+                print(f"nobody enrolled under '{args.name}'. Known: "
+                      f"{', '.join(p.name for p in store.people()) or 'nobody'}")
+                return 1
+            if not args.yes and not _confirm(
+                f"\nDelete the voiceprint for {person.name} "
+                f"({len(person.samples)} sample(s))?\nType the name to confirm: ",
+                person.name,
+            ):
+                return 1
+            store.forget(person.id)
+            store.save()
+            print(f"\n{person.name} is no longer recognised. Transcripts already written keep "
+                  "the name they were given; this only affects future recordings.\n")
+            return 0
+
+        # ---- enroll ------------------------------------------------------
+        if action == "enroll":
+            src = Path(args.audio)
+            if not src.exists():
+                print(f"no such file: {src}")
+                return 1
+            ok, why = Embedder.available(cfg)
+            if not ok:
+                print(f"\ncannot enroll: {why}\n")
+                return 1
+
+            work = cfg.path("work") / "enroll"
+            prepared = _prepared_audio(cfg, src, work)
+            span = ""
+            if args.start is not None or args.end is not None:
+                span = f" [{args.start or 0:.0f}s-{args.end:.0f}s]" if args.end else ""
+            print(f"\nembedding {src.name}{span} ...")
+
+            vector = Embedder(cfg).embed(prepared, args.start, args.end)
+            seconds = (args.end - (args.start or 0.0)) if args.end else 0.0
+            if not seconds:
+                from .audio import probe_duration
+
+                seconds = probe_duration(prepared, cfg.get("audio.ffprobe_binary", "ffprobe"))
+
+            person = store.enroll(args.name, vector, source=src.name, seconds=seconds,
+                                  replace=args.replace)
+            store.save()
+            _discard_scratch(work)
+            print(f"\n{person.name} enrolled from {seconds:.0f}s of speech "
+                  f"({len(person.samples)} sample(s) total).")
+            print("Add a second clip from a different room to make matching more reliable.\n")
+            return 0
+
+        # ---- identify ----------------------------------------------------
+        if action == "identify":
+            src = Path(args.audio)
+            if not src.exists():
+                print(f"no such file: {src}")
+                return 1
+            if store.is_empty():
+                print("\nNobody is enrolled, so there is nothing to compare against.\n")
+                return 1
+
+            from .diarize.engine import DiarizationError, speaker_turns
+
+            work = cfg.path("work") / "identify"
+            prepared = _prepared_audio(cfg, src, work)
+            try:
+                segments = speaker_turns(prepared, cfg)
+            except DiarizationError as exc:
+                print(f"\ncannot separate speakers: {exc}")
+                print("Without diarization this can only be scored as a single voice.\n")
+                segments = []
+            if not segments:
+                from .audio import probe_duration
+                from .models import Segment as _Segment
+
+                total = probe_duration(prepared, cfg.get("audio.ffprobe_binary", "ffprobe"))
+                segments = [_Segment(start=0.0, end=total, text="", speaker="WHOLE FILE")]
+
+            matches = identify(prepared, segments, cfg, store)
+            threshold = float(cfg.get("diarization.identify.threshold", 0.55))
+            print(f"\n{src.name}: {len(matches)} cluster(s), threshold {threshold:.2f}\n")
+            for match in matches:
+                verdict = match.matched or "unnamed"
+                print(f"  {match.cluster:14s} {match.seconds:6.1f}s  -> {verdict}")
+                for name, score in match.scores[:4]:
+                    marker = "*" if name == match.matched else " "
+                    print(f"  {'':14s} {marker} {name:22s} {score:.3f}")
+                if not match.matched:
+                    print(f"  {'':14s}   ({match.reason})")
+            _discard_scratch(work)
+            print("\nNothing was written. Adjust diarization.identify.threshold and margin "
+                  "in pipeline.yaml if these scores disagree with your ears.\n")
+            return 0
+
+    except (VoiceprintError, VaultError, AudioError) as exc:
+        print(f"\n{exc}\n", file=sys.stderr)
+        return 1
+
+    return 1
+
+
+def _discard_scratch(work_dir: Path) -> None:
+    """An enrollment clip is somebody's voice; the scratch copy does not linger."""
+    from .audio import AudioPreparer
+
+    AudioPreparer.cleanup(work_dir)
 
 
 def cmd_review(args) -> int:
@@ -953,10 +1764,21 @@ def cmd_review(args) -> int:
         fallback = cfg.get("routing.fallback_profile", "unfiled")
         print(f"\nUnfiled recordings (last {args.days} days)")
         suggestions: dict[str, int] = {}
+        unopened = 0
         unfiled_rows = db.query(profile_id=fallback, since_days=args.days, limit=200)
+        archive = Archive(cfg, db)
         for row in unfiled_rows:
-            payload = json.loads(row["payload_json"])
-            for analysis in payload.get("analyses", []):
+            # The fallback profile encrypts at rest, so the index withholds its
+            # fields and the suggestions live in the vault. Reading the index
+            # row alone here answered "no keyword suggestions" for every
+            # encrypted recording -- a false answer about the one thing this
+            # section is for -- so open the record properly, and count what
+            # would not open rather than reading it as empty.
+            record = archive.full_record(row)
+            if record is None:
+                unopened += 1
+                continue
+            for analysis in record.get("analyses", []):
                 if analysis.get("profile_id") != fallback:
                     continue
                 for word in analysis.get("fields", {}).get("suggested_keywords") or []:
@@ -964,12 +1786,15 @@ def cmd_review(args) -> int:
                     if key:
                         suggestions[key] = suggestions.get(key, 0) + 1
         print(f"  {len(unfiled_rows)} recording(s) the router could not place")
+        if unopened:
+            print(f"  {unopened} of them could not be opened, so their suggestions are not "
+                  "counted. Set PLAUD_BRIDGE_PASSPHRASE if they are encrypted.")
         if suggestions:
             top = sorted(suggestions.items(), key=lambda kv: -kv[1])[:15]
             print("  keywords worth adding to a profile:")
             print("    " + ", ".join(f"{w} ({n})" for w, n in top))
             due.append("add the keywords above to the right profile's routing.keywords")
-        elif unfiled_rows:
+        elif unfiled_rows and not unopened:
             print("  no keyword suggestions; read them with `run.py search`")
 
         # --- quarterly: retention ----------------------------------------
@@ -1014,6 +1839,158 @@ def cmd_profiles(args) -> int:
     return 0
 
 
+def cmd_backup(args) -> int:
+    """
+    Everything worth keeping, as one encrypted file.
+
+    The vault's honesty about loss cuts both ways: lose the disk and the
+    archive is gone, because nothing in this tool copies anything anywhere.
+    This is the copy. It is a single file precisely so it can sit on an
+    external drive or in a cloud folder -- and it is encrypted with the vault's
+    own cipher precisely because that folder is not this machine.
+    """
+    from .backup import BackupError, create_backup, default_backup_path
+
+    cfg = _load(args)
+    out = Path(args.out) if args.out else default_backup_path()
+    try:
+        report = create_backup(cfg, Path(args.config), out)
+    except (BackupError, VaultError) as exc:
+        print(f"\n{exc}\n", file=sys.stderr)
+        return 1
+
+    print("\nBacked up, encrypted:")
+    for name, count in report.counts.items():
+        print(f"  {name:12s} {count} file(s)")
+    if report.skipped:
+        print(f"  nothing to include from: {', '.join(report.skipped)}")
+    print("  (data/inbox and data/work are transient and are left out)")
+    print(f"\nwrote {report.path} ({report.size_bytes:,} bytes)")
+    print("\nRestoring needs the passphrase in PLAUD_BRIDGE_PASSPHRASE. It is not")
+    print("stored in this file or anywhere else. Lose the passphrase and this")
+    print("backup is unreadable noise -- keep them apart, but keep them both.")
+    return 0
+
+
+def cmd_restore(args) -> int:
+    """
+    Bring the archive back from a backup file.
+
+    All-or-nothing on purpose: the bundle is decrypted and checked in a temp
+    directory first, so a wrong passphrase or a tampered file is the vault's
+    honest error and an untouched data directory, never a half-restored one.
+    """
+    from .backup import BackupError, restore_backup
+
+    cfg = _load(args)
+    try:
+        report = restore_backup(cfg, Path(args.config), Path(args.file), force=args.force)
+    except (BackupError, VaultError) as exc:
+        print(f"\n{exc}\n", file=sys.stderr)
+        return 1
+
+    print("\nrestored: " + ", ".join(
+        f"{name} ({count} file(s))" for name, count in report.restored.items()
+    ))
+    if report.replaced:
+        print("\nreplaced with the backup's copy (the previous versions are gone):")
+        for path in report.replaced:
+            print(f"  {path}")
+    if report.config_skipped:
+        print("\nThe config directory was left as it is; the backup's copy is only")
+        print("restored with --force, so a tuned profile is never silently undone.")
+    print("\nRun `python run.py verify` to confirm every artifact still opens.")
+    return 0
+
+
+def cmd_demo(args) -> int:
+    """
+    Furnish the archive with fictional samples, so nothing starts empty.
+
+    The samples go through the ordinary pipeline -- there is no pre-baked
+    database and no path the real code would not take. Every sample is labelled
+    as fictional in its own first line, so nobody can meet this content later
+    without knowing what it is.
+    """
+    from . import demo
+
+    cfg = _load(args)
+    if args.clean:
+        removed = demo.clean(cfg)
+        if not removed:
+            print("\nNo sample files were waiting in the inbox.\n")
+            return 0
+        print("\nremoved from the inbox:")
+        for path in removed:
+            print(f"  {path.name}")
+        print("\nAnything already processed stays in the archive; use "
+              "`forget <id>` to remove those.\n")
+        return 0
+
+    written, skipped = demo.install(cfg, overwrite=args.force)
+    print()
+    for path in written:
+        print(f"  wrote {path.name}")
+    for path in skipped:
+        print(f"  kept  {path.name} (already in the inbox; --force replaces it)")
+    print("\n" + demo.describe())
+    if not args.process:
+        print("\nNow run:  python run.py run")
+        print("Then try: run.py digest --format html · run.py brief · "
+              "run.py people · run.py insights\n")
+        return 0
+
+    print("\nProcessing them now...\n")
+    return cmd_run(args)
+
+
+def cmd_app(args) -> int:
+    """
+    The local app, started from the command line.
+
+    Same server the packaged Windows build runs -- this is only a different
+    front door to it, so anything true in the app is true here. `--probe`
+    stands it up, checks it answers, and exits: a self-test for the whole app
+    stack that needs no browser and no human.
+    """
+    from .desktop.launch import build
+
+    base_dir = Path(args.home).expanduser() if args.home else None
+    app, httpd, url = build(base_dir=base_dir, port=args.port, phone=args.phone)
+    try:
+        if args.probe:
+            import threading
+            import urllib.request
+
+            threading.Thread(target=httpd.serve_forever, daemon=True).start()
+            page = urllib.request.urlopen(url, timeout=10)
+            body = page.read()
+            ok = page.status == 200 and app.token.encode() in body
+            print(f"\napp probe: {'ok' if ok else 'FAILED'} -- "
+                  f"served {len(body)} bytes on {url.split('/?')[0]}")
+            print(f"  token guard: {'on' if app.token else 'MISSING'}")
+            print(f"  phone mode:  {app.lan_url or 'off (loopback only)'}\n")
+            return 0 if ok else 1
+
+        print("\nPlaud Bridge is running.")
+        print(f"  Open this in your browser:\n    {url}")
+        if app.lan_url:
+            print(f"  On your phone (same Wi-Fi):\n    {app.lan_url}")
+            print("  Home network only -- the link carries this session's key.")
+        print("  Press Ctrl-C to stop.\n")
+        try:
+            httpd.serve_forever()
+        except KeyboardInterrupt:
+            print("\nStopping.")
+        return 0
+    finally:
+        # Closing the socket is the whole cleanup in both paths. Deliberately
+        # no shutdown(): it blocks forever waiting on a serve_forever loop,
+        # which by here has either already returned or is a daemon thread the
+        # process is about to leave behind.
+        httpd.server_close()
+
+
 # =========================================================================
 def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(
@@ -1048,6 +2025,51 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--title", default=None)
     p.set_defaults(func=cmd_digest)
 
+    p = sub.add_parser("brief",
+                       help="the week in one memo, synthesised across the archive")
+    p.add_argument("--days", type=int, default=None, help="lookback window (default 7)")
+    p.add_argument("--include-personal", action="store_true",
+                   help="include father/husband; their presence forces local processing")
+    p.add_argument("--out", default=None, help="write to a file instead of stdout")
+    p.add_argument("--format", default="markdown", choices=["markdown", "html"],
+                   help="html is self-contained and prints cleanly")
+    p.set_defaults(func=cmd_brief)
+
+    p = sub.add_parser("followups",
+                       help="commitments still open, and drafts you send yourself")
+    p.add_argument("--profile", default=None, help="filter to one profile id")
+    p.add_argument("--days", type=int, default=None,
+                   help="lookback window. The default is everything: a promise does "
+                        "not stop counting because it is old.")
+    p.add_argument("--status", default="open",
+                   choices=["open", "done", "dropped", "all"],
+                   help="which follow-ups to show (default: open)")
+    p.add_argument("--include-personal", action="store_true",
+                   help="include father/husband, in the list and in drafts")
+    p.add_argument("--done", default=None, metavar="ID", help="mark one follow-up done")
+    p.add_argument("--drop", default=None, metavar="ID", help="mark one as dropped")
+    p.add_argument("--reopen", default=None, metavar="ID", help="mark one open again")
+    p.add_argument("--draft", default=None, metavar="ID",
+                   help="write a draft into the outbox: a follow-up id, a recording "
+                        "id, or 'open' for everything outstanding. Nothing is sent.")
+    p.add_argument("--format", default="markdown",
+                   choices=["markdown", "html", "text"],
+                   help="html for the worklist, text for a plain-text draft")
+    p.add_argument("--out", default=None, help="write to a file instead of stdout")
+    p.add_argument("--title", default=None)
+    p.set_defaults(func=cmd_followups)
+
+    p = sub.add_parser("insights",
+                       help="how you talk: share, pace, questions, monologues")
+    p.add_argument("--recording", default=None, metavar="ID",
+                   help="one recording's breakdown per speaker")
+    p.add_argument("--days", type=int, default=30, help="lookback window (default 30)")
+    p.add_argument("--profile", default=None, help="filter to one profile id")
+    p.add_argument("--include-personal", action="store_true",
+                   help="count father/husband recordings too; they are left out "
+                        "by default, the same rule as the digest")
+    p.set_defaults(func=cmd_insights)
+
     p = sub.add_parser("status", help="index summary")
     p.set_defaults(func=cmd_status)
 
@@ -1066,6 +2088,21 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--days", type=int, default=None)
     p.add_argument("--limit", type=int, default=50)
     p.set_defaults(func=cmd_search)
+
+    p = sub.add_parser("ask", help="answer a question from what was actually said")
+    p.add_argument("question", help='e.g. "what did I promise the Hendersons?"')
+    p.add_argument("--profile", default=None, help="restrict to one profile id")
+    p.add_argument("--days", type=int, default=None,
+                   help="lookback window (default: ask.days; 0 searches everything)")
+    p.add_argument("--limit", type=int, default=None,
+                   help="how many recordings may contribute to one answer")
+    p.add_argument("--include-personal", action="store_true",
+                   help="search father/husband too; they are left out by default")
+    p.add_argument("--local-only", action="store_true",
+                   help="force local processing even where every profile permits cloud")
+    p.add_argument("--save", action="store_true",
+                   help="keep the answer in the vault, encrypted")
+    p.set_defaults(func=cmd_ask)
 
     p = sub.add_parser("verify", help="check every artifact still exists and still opens")
     p.set_defaults(func=cmd_verify)
@@ -1118,6 +2155,16 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--yes", action="store_true", help="skip the confirmation prompt")
     p.set_defaults(func=cmd_release)
 
+    p = sub.add_parser("quarantine",
+                       help="triage everything in quarantine: list, bulk release, bulk forget")
+    verbs = p.add_mutually_exclusive_group()
+    verbs.add_argument("--release-all", action="store_true",
+                       help="release everything EXCEPT explicit refusals back to the inbox")
+    verbs.add_argument("--forget-all", action="store_true",
+                       help="permanently delete every quarantined recording and its traces")
+    p.add_argument("--yes", action="store_true", help="skip the confirmation prompt")
+    p.set_defaults(func=cmd_quarantine)
+
     p = sub.add_parser("retention", help="show or execute the retention sweep")
     p.add_argument("--execute", action="store_true", help="actually delete (default is dry run)")
     p.add_argument("--yes", action="store_true")
@@ -1125,6 +2172,18 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("profiles", help="show the routing table")
     p.set_defaults(func=cmd_profiles)
+
+    p = sub.add_parser("memory", help="what the tool has learned across recordings")
+    p.add_argument("--profile", default=None, help="one profile id (default: every profile)")
+    p.add_argument("--brief", action="store_true",
+                   help="show the briefing that gets injected into the next analysis")
+    p.add_argument("--rebuild", action="store_true",
+                   help="discard the ledgers and rebuild them from the stored archive")
+    p.add_argument("--force", action="store_true",
+                   help="with --rebuild: accept a rebuild that could not open everything")
+    p.add_argument("--forget", default=None, metavar="RECORDING_ID",
+                   help="remove one recording from every ledger")
+    p.set_defaults(func=cmd_memory)
 
     p = sub.add_parser("new-profile", help="scaffold a profile from the template")
     p.add_argument("profile_id", help="identifier and filename stem, e.g. mentor")
@@ -1136,11 +2195,88 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("voices", help="show installed voice packs")
     p.set_defaults(func=cmd_voices)
 
+    p = sub.add_parser("speakers", help="teach it who is who, so transcripts use names")
+    p.set_defaults(func=cmd_speakers)
+    speakers = p.add_subparsers(dest="speakers_action", required=True)
+
+    sp = speakers.add_parser("list", help="who this archive can recognise")
+    sp.set_defaults(func=cmd_speakers)
+
+    sp = speakers.add_parser("enroll", help="learn a voice from a clip of one person talking")
+    sp.add_argument("name", help='display name, e.g. "Marcus"')
+    sp.add_argument("--audio", required=True, help="a clip of this person and nobody else")
+    sp.add_argument("--start", type=float, default=None,
+                    help="seconds into the file to start (use when the clip is not clean)")
+    sp.add_argument("--end", type=float, default=None, help="seconds into the file to stop")
+    sp.add_argument("--replace", action="store_true",
+                    help="discard this person's existing samples instead of adding to them")
+    sp.set_defaults(func=cmd_speakers)
+
+    sp = speakers.add_parser("identify",
+                             help="score a recording against the enrolled voices, changing nothing")
+    sp.add_argument("audio")
+    sp.set_defaults(func=cmd_speakers)
+
+    sp = speakers.add_parser("forget", help="delete a voiceprint permanently")
+    sp.add_argument("name")
+    sp.add_argument("--yes", action="store_true", help="skip the confirmation prompt")
+    sp.set_defaults(func=cmd_speakers)
+
     p = sub.add_parser("review", help="the COMPLIANCE.md review cadence, assembled")
     p.add_argument("--days", type=int, default=30, help="lookback window (default 30)")
     p.add_argument("--reaffirm", default=None, metavar="PROFILE",
                    help="record a standing-consent reaffirmation for a profile")
     p.set_defaults(func=cmd_review)
+
+    p = sub.add_parser("backup", help="everything worth keeping, as one encrypted file")
+    p.add_argument("--out", default=None,
+                   help="where to write the .pbb file "
+                        "(default: plaud-backup-<timestamp>.pbb in your home directory)")
+    p.set_defaults(func=cmd_backup)
+
+    p = sub.add_parser("restore", help="bring the archive back from a backup file")
+    p.add_argument("file", help="a .pbb file written by `backup`")
+    p.add_argument("--force", action="store_true",
+                   help="replace data already in place, including the config directory")
+    p.set_defaults(func=cmd_restore)
+
+    p = sub.add_parser("demo",
+                       help="fill the archive with fictional samples to explore")
+    p.add_argument("--process", action="store_true",
+                   help="run the pipeline over them straight away")
+    p.add_argument("--clean", action="store_true",
+                   help="remove sample files still waiting in the inbox")
+    p.add_argument("--force", action="store_true",
+                   help="replace sample files already in the inbox")
+    # `--process` hands off to cmd_run, which reads this too.
+    p.set_defaults(func=cmd_demo, limit=None)
+
+    p = sub.add_parser("app", help="run the local app from the command line")
+    p.add_argument("--port", type=int, default=0,
+                   help="port to bind (default: an unused one)")
+    p.add_argument("--home", default=None,
+                   help="data directory the app should use")
+    p.add_argument("--phone", action="store_true",
+                   help="also answer this machine's Wi-Fi address (home network only)")
+    p.add_argument("--probe", action="store_true",
+                   help="start it, check it answers, print the result, and exit")
+    p.set_defaults(func=cmd_app)
+
+    p = sub.add_parser("people",
+                       help="everyone the archive has heard, or one person's page")
+    p.add_argument("--name", default=None, metavar="NAME",
+                   help='one person\'s full dossier, e.g. --name "Marcus"')
+    p.add_argument("--days", type=int, default=None,
+                   help="lookback window. The default is everything: a person "
+                        "does not stop existing because you last spoke in March.")
+    p.add_argument("--include-personal",
+                   action="store_true",
+                   help="include people from father/husband recordings")
+    p.add_argument("--format", default="markdown", choices=["markdown", "html"],
+                   help="html is self-contained and prints cleanly")
+    p.add_argument("--out", default=None, help="write to a file instead of stdout")
+    p.add_argument("--title", default=None)
+    p.set_defaults(func=cmd_people)
 
     return ap
 

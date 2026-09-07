@@ -25,6 +25,7 @@ from pathlib import Path
 
 from .asr import transcribe
 from .asr.base import ASRError
+from .asr.confidence import Assessment, assess, prompt_warning
 from .audio import AudioError, AudioPreparer
 from .compliance import ComplianceGate, RetentionSweeper
 from .config import Config
@@ -33,6 +34,7 @@ from .db import Database
 from .diarize import diarize
 from .episodes import segment_episodes, transcript_for
 from .logging_setup import get
+from .memory import MemoryStore, carry_forward_brief
 from .models import (
     ProfileAnalysis,
     Recording,
@@ -60,6 +62,7 @@ class Pipeline:
         cfg.ensure_dirs()
         self.db = Database(cfg.path("database"))
         self.vault = Vault(cfg.path("vault"))
+        self.memory = MemoryStore(cfg)
         self.audio = AudioPreparer(cfg)
         self.gate = ComplianceGate(cfg)
         self.retention = RetentionSweeper(cfg, self.db)
@@ -142,6 +145,23 @@ class Pipeline:
             kind=kind,
             recorded_at=datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc),
         )
+        if existing:
+            # --force means process this file again, not pretend it is a
+            # different file. A fresh id here wrote a second quarantine folder
+            # under a new id, then failed to index it because content_hash is
+            # UNIQUE -- and the log blamed a concurrent process for something a
+            # flag had done. The folder that survived belonged to a recording no
+            # index knew about, which is the one state nothing can clean up.
+            rec.id = existing
+            # And remove the previous run's files before the new one starts.
+            # Reprocessing can change where this recording is stored -- a profile
+            # change moves it from the plaintext outbox into the vault, a consent
+            # change sends it to quarantine and it never persists at all -- and
+            # the old files do not move themselves. Without this a --force that
+            # re-encrypts a recording leaves the old plaintext transcript sitting
+            # in the outbox, which is the exact copy the encryption existed to
+            # prevent.
+            self._purge_prior_artifacts(rec.id, keep=path)
         self.db.audit("ingest", f"{path.name} ({stat.st_size} bytes)", rec.id)
         log.info("processing %s (%s, %.1fMB)", path.name, kind, stat.st_size / 1_048_576)
 
@@ -160,6 +180,18 @@ class Pipeline:
             if rec.transcript is None or not _has_speech(rec.transcript.segments):
                 raise PipelineError("no transcribable content found")
 
+            # Ask the recogniser how much of that it was guessing at, before
+            # anything downstream starts treating it as fact. This stops
+            # nothing: a quiet conversation in a car scores badly and is still
+            # the conversation you wanted. It records the answer so a bad
+            # transcript is read as a bad transcript rather than as testimony.
+            # Imported text has no scores and records "unknown", which is the
+            # honest answer rather than a pass it never earned.
+            verdict = assess(rec.transcript.segments, self.cfg)
+            rec.transcript.confidence_report = verdict.to_dict()
+            if not verdict.believable:
+                self.db.audit("transcript_confidence", verdict.reason[:500], rec.id)
+
             rec.stage = Stage.CORRECTED
             self._route(rec)
             self._gate(rec)
@@ -171,6 +203,7 @@ class Pipeline:
 
             self._analyse(rec)
             self._persist(rec)
+            self._remember(rec)
 
             rec.stage = Stage.COMPLETE
             stats.processed += 1
@@ -228,7 +261,24 @@ class Pipeline:
             self.db.audit("glossary", report.summary(), rec.id)
 
     def _load_text(self, rec: Recording, path: Path) -> None:
-        """Accept a Plaud-exported transcript directly, skipping ASR entirely."""
+        """Accept an exported transcript directly, skipping ASR entirely."""
+        # A text transcript is read whole into memory before it is parsed, so a
+        # size ceiling has to come first. Without it a stray multi-gigabyte file
+        # -- a log, a DB dump, the wrong thing dragged into the inbox -- is read
+        # in its entirety and then split into a list proportional to its size,
+        # which is a plain out-of-memory. Refuse before reading rather than after.
+        max_bytes = int(self.cfg.get("ingest.max_text_bytes", 10_000_000))
+        try:
+            size = path.stat().st_size
+        except OSError as exc:
+            raise PipelineError(f"cannot read {path.name}: {exc}") from exc
+        if size > max_bytes:
+            raise PipelineError(
+                f"{path.name} is {size / 1_000_000:.1f} MB of text, over the "
+                f"ingest.max_text_bytes ceiling of {max_bytes / 1_000_000:.1f} MB. "
+                "A transcript this large is almost certainly not a transcript. "
+                "Raise the limit in config if it genuinely is one."
+            )
         # utf-8-sig strips the byte order mark other tools leave at the front.
         # Without it the first speaker's name carries an invisible character,
         # which is enough to stop the speaker-label heuristics recognising it —
@@ -384,12 +434,31 @@ class Pipeline:
                 portion = rec.transcript
 
             body = portion.labelled_text()
-            redacted, counts = self.gate.redact_for_llm(body, governing)
+            # Redaction before a cloud model is a floor, like locality and
+            # encryption: if ANY matched profile wants its content redacted, the
+            # text is redacted, whichever profile governs. Keying it to the
+            # governing profile alone meant that with strictest_profile_governs
+            # off, a redact-requiring profile could be overridden by a lead one
+            # that does not, and PII would reach the model unredacted.
+            redact_profile = governing
+            if not governing.redact_before_llm:
+                for pid in rec.profile_ids:
+                    other = self.cfg.profile(pid) if pid in self.cfg.profiles else None
+                    if other and other.redact_before_llm:
+                        redact_profile = other
+                        break
+            redacted, counts = self.gate.redact_for_llm(body, redact_profile)
             for name, count in counts.items():
                 rec.compliance.redactions[name] = rec.compliance.redactions.get(name, 0) + count
 
+            # What we already know about this profile, from recordings already
+            # analysed. Built from stored artifacts, so it costs no model call,
+            # and it is per profile: the Husband ledger never reaches an
+            # Insurance Agent prompt.
+            prior = carry_forward_brief(self.cfg, profile.id, self.memory)
             analysis: ProfileAnalysis = extract(
-                portion, profile, self.cfg, redacted, local_only=local_only
+                portion, profile, self.cfg, redacted, local_only=local_only, prior=prior,
+                warning=prompt_warning(Assessment.from_dict(rec.transcript.confidence_report)),
             )
             rec.analyses.append(analysis)
             rec.total_cost_usd += analysis.cost_usd
@@ -403,6 +472,74 @@ class Pipeline:
         rec.stage = Stage.ANALYZED
 
     # ---- persistence ----------------------------------------------------
+    def _remember(self, rec: Recording) -> None:
+        """
+        Fold this recording into the per-profile memory ledgers.
+
+        After persistence, deliberately: memory is derived from what is stored,
+        so a recording that failed to persist must not be remembered as though
+        it had. Nothing here can fail the run. A ledger that could not be
+        written is a lost convenience, and `run.py memory --rebuild` gets it
+        back from the archive.
+        """
+        if not self.cfg.get("memory.enabled", True):
+            return
+        try:
+            self.memory.update_from_record(rec)
+        except Exception as exc:  # noqa: BLE001 - memory is a convenience, not the product
+            log.warning("could not update memory for %s: %s", rec.id, exc)
+
+    def _purge_prior_artifacts(self, recording_id: str, keep: Path | None = None) -> None:
+        """
+        Delete a previous run's files before --force reprocesses the same id.
+
+        Only files inside our own data directories are touched, and `keep` (the
+        inbox file being processed right now) is never removed. The artifact rows
+        are dropped too, so a reprocess that ends in quarantine does not leave the
+        index pointing at files that are no longer there.
+        """
+        from .archive import is_owned, owned_roots
+
+        roots = owned_roots(self.cfg)
+        keep_resolved = keep.resolve() if keep else None
+
+        payload = self.db.load(recording_id) or {}
+        paths: set[str] = {str(v) for v in (payload.get("artifact_paths") or {}).values()}
+        kinds: set[str] = set()
+        for art in self.db.all_artifacts():
+            if art["recording_id"] == recording_id:
+                paths.add(art["path"])
+                kinds.add(art["kind"])
+
+        processed = self.cfg.path("inbox") / "_processed"
+        if processed.is_dir():
+            paths.update(str(p) for p in processed.glob(f"{recording_id}_*"))
+
+        removed = 0
+        for value in paths:
+            p = Path(value)
+            try:
+                if p.resolve() == keep_resolved:
+                    continue
+                if p.exists() and is_owned(p, roots):
+                    p.unlink()
+                    removed += 1
+            except OSError as exc:
+                log.warning("could not remove prior artifact %s: %s", p, exc)
+
+        for kind in kinds:
+            self.db.drop_artifact(recording_id, kind)
+
+        qdir = self.cfg.path("quarantine") / recording_id
+        if qdir.is_dir():
+            shutil.rmtree(qdir, ignore_errors=True)
+
+        if removed:
+            log.info("reprocess: cleared %d prior artifact file(s) for %s", removed, recording_id)
+            self.db.audit(
+                "reprocess_purge", f"removed {removed} prior artifact file(s)", recording_id
+            )
+
     def _persist(self, rec: Recording) -> None:
         governing = self.cfg.profile(rec.compliance.governing_profile or "unfiled")
         # Read the gate's verdict rather than re-deriving it, so this and the
@@ -430,8 +567,12 @@ class Pipeline:
         else:
             out = self.cfg.path("outbox") / stem
             out.parent.mkdir(parents=True, exist_ok=True)
-            (out.parent / f"{rec.id}.transcript.md").write_text(transcript_md, encoding="utf-8")
-            (out.parent / f"{rec.id}.analysis.json").write_text(analysis_json, encoding="utf-8")
+            # Atomic, the way the vault writes are: a crash or a full disk in the
+            # middle of write_text leaves a half-written transcript that reads as
+            # a complete one. Write to a temp name and rename it into place, so
+            # the file at the final path is always whole or absent.
+            _atomic_write_text(out.parent / f"{rec.id}.transcript.md", transcript_md)
+            _atomic_write_text(out.parent / f"{rec.id}.analysis.json", analysis_json)
             rec.artifact_paths["transcript"] = str(out.parent / f"{rec.id}.transcript.md")
             rec.artifact_paths["analysis"] = str(out.parent / f"{rec.id}.analysis.json")
 
@@ -617,7 +758,14 @@ class Pipeline:
 _STAMP_RE = re.compile(
     r"(\d{2}):(\d{2}):(\d{2})[,.](\d{3})\s*-->\s*(\d{2}):(\d{2}):(\d{2})[,.](\d{3})"
 )
-_SPEAKER_RE = re.compile(r"^(?P<speaker>[A-Za-z][\w .'\-]{0,30}?):\s+(?P<text>\S.*)$")
+# The second alternative admits a label with nothing after it ("Marcus:" on a
+# line of its own -- a speaker change an exporter emitted without words). It
+# used to fall through as literal text credited to SPEAKER, so the archive
+# held an utterance whose words were somebody's name. Deliberately narrow:
+# "Re:invoice" and other no-space forms still do not read as speech.
+_SPEAKER_RE = re.compile(
+    r"^(?P<speaker>[A-Za-z][\w .'\-]{0,30}?):(?:\s+(?P<text>\S.*)|\s*)$"
+)
 _TS_PREFIX_RE = re.compile(r"^\[(?P<ts>\d{1,2}:\d{2}(?::\d{2})?)\]\s*(?P<rest>.*)$")
 
 # Words that start sentences and are followed by a colon often enough to be
@@ -642,6 +790,13 @@ WORDS_PER_SECOND = 2.6
 INVISIBLE = "﻿​‌‍⁠­￼�"
 
 
+def _atomic_write_text(path: Path, text: str) -> None:
+    """Write text so the file at `path` is always whole or absent, never partial."""
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(text, encoding="utf-8")
+    tmp.replace(path)
+
+
 def _has_speech(segments) -> bool:
     """
     Whether a parsed transcript holds anything anyone actually said.
@@ -660,12 +815,13 @@ def _speaker_split(line: str) -> tuple[str, str] | None:
     if not match:
         return None
     speaker = match.group("speaker").strip()
+    text = match.group("text") or ""      # None when the label stands alone
     # "See https://example.com/x" is a URL, not See speaking.
-    if "//" in match.group("text")[:2] or "://" in line:
+    if "//" in text[:2] or "://" in line:
         return None
     if speaker.lower() in _NOT_A_SPEAKER or len(speaker.split()) > 4:
         return None
-    return speaker, match.group("text").strip()
+    return speaker, text.strip()
 
 
 def _confirmed_speakers(lines: list[str]) -> set[str]:
@@ -690,16 +846,115 @@ def _confirmed_speakers(lines: list[str]) -> set[str]:
     return confirmed
 
 
+# WebVTT allows hourless timestamps and either separator for milliseconds,
+# because Zoom writes 00:04.000 where Teams writes 00:00:04.000 and at least
+# one exporter in the wild uses the SRT comma.
+_VTT_STAMP_RE = re.compile(
+    r"(?:(\d{1,3}):)?(\d{1,2}):(\d{2})[.,](\d{3})\s*-->\s*"
+    r"(?:(\d{1,3}):)?(\d{1,2}):(\d{2})[.,](\d{3})"
+)
+# <v Marcus Reed>, <v.loud Marcus>, case-insensitive because exporters vary.
+_VTT_VOICE_RE = re.compile(r"<v(?:\.[^ >]*)?\s+(?P<name>[^>]+)>", re.IGNORECASE)
+# Everything else in angle brackets: </v>, <c>, <i>, inline <00:00:01.000> cues.
+_VTT_TAG_RE = re.compile(r"</?[^>]*>")
+
+
+def _vtt_seconds(hours: str | None, minutes: str, seconds: str, millis: str) -> float:
+    return int(hours or 0) * 3600 + int(minutes) * 60 + int(seconds) + int(millis) / 1000.0
+
+
+def _parse_vtt(raw: str) -> list[Segment]:
+    """
+    Parse WebVTT, the format every meeting tool actually exports.
+
+    Zoom, Teams, Fireflies, tl;dv, and YouTube all hand you .vtt, so accepting
+    it is the difference between "works with your recorder" and "works with
+    everything that records". Two things distinguish it from SRT beyond the
+    header: cue text may carry markup, and Teams wraps each utterance in a
+    <v Speaker Name> voice tag.
+
+    The voice tag is treated as authoritative. It is the meeting platform
+    stating who spoke -- from its own per-participant audio channels -- not a
+    heuristic guessing from a "Name:" prefix. That attribution flows through
+    unchanged, which means a Teams export arrives with named speakers without
+    diarization, enrollment, or any model at all.
+    """
+    bodies: list[tuple[float, float, str | None, str]] = []
+
+    for block in re.split(r"\n\s*\n", raw.lstrip("\ufeff").strip()):
+        lines = block.strip().splitlines()
+        if not lines:
+            continue
+        # Header and non-cue blocks. NOTE and STYLE bodies can contain almost
+        # anything, including things that look like cues, so the whole block
+        # goes rather than its individual lines.
+        if lines[0].split(" ")[0] in ("WEBVTT", "NOTE", "STYLE", "REGION"):
+            continue
+
+        stamp_at, match = None, None
+        for index, line in enumerate(lines):
+            match = _VTT_STAMP_RE.search(line)
+            if match:
+                stamp_at = index
+                break
+        if stamp_at is None or match is None:
+            continue
+        g = match.groups()
+        start = _vtt_seconds(g[0], g[1], g[2], g[3])
+        end = _vtt_seconds(g[4], g[5], g[6], g[7])
+
+        # Text is whatever follows the timestamp line. Taking "lines after the
+        # stamp" rather than "lines that are not stamps" is what drops the
+        # optional cue identifier, which may be a bare number or any string.
+        text = " ".join(ln.strip() for ln in lines[stamp_at + 1:]).strip()
+        if not text:
+            continue
+
+        voices = list(_VTT_VOICE_RE.finditer(text))
+        if voices:
+            # A cue can carry several voices; each becomes its own segment so
+            # a two-person exchange inside one cue does not merge into one
+            # speaker's mouth.
+            for index, voice in enumerate(voices):
+                until = voices[index + 1].start() if index + 1 < len(voices) else len(text)
+                spoken = _VTT_TAG_RE.sub("", text[voice.end():until]).strip()
+                if spoken:
+                    bodies.append((start, end, voice.group("name").strip(), spoken))
+        else:
+            spoken = _VTT_TAG_RE.sub("", text).strip()
+            if spoken:
+                bodies.append((start, end, None, spoken))
+
+    # Cues without a voice tag still get the "Name: text" heuristic, under the
+    # same confirmation rules as SRT, so an Otter export is not worse off for
+    # having been converted to VTT somewhere along the way.
+    confirmed = _confirmed_speakers([b[3] for b in bodies if b[2] is None])
+    segments: list[Segment] = []
+    for start, end, stated, text in bodies:
+        if stated is not None:
+            segments.append(Segment(start, end, text, stated))
+            continue
+        speaker = "SPEAKER"
+        split = _speaker_split(text)
+        if split and split[0] in confirmed:
+            speaker, text = split
+        segments.append(Segment(start, end, text, speaker))
+    return segments
+
+
 def _parse_text_transcript(raw: str, suffix: str) -> list[Segment]:
     """
-    Parse a Plaud-exported transcript.
+    Parse a transcript exported by whatever tool made it.
 
-    SRT gives real timestamps. Plain text does not, so we synthesise a rough
-    timeline at an average speaking rate. Those timestamps are approximations
-    and are labelled as such; do not quote them as evidence of when something
-    was said.
+    SRT and VTT give real timestamps. Plain text does not, so we synthesise a
+    rough timeline at an average speaking rate. Those timestamps are
+    approximations and are labelled as such; do not quote them as evidence of
+    when something was said.
     """
     segments: list[Segment] = []
+
+    if suffix == ".vtt":
+        return _parse_vtt(raw)
 
     if suffix == ".srt":
         blocks = re.split(r"\n\s*\n", raw.strip())

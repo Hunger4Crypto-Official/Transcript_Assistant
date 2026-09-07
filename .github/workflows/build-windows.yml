@@ -1,0 +1,99 @@
+name: Build Windows app
+
+# Builds the double-clickable Windows app. A Windows .exe can only be produced on
+# Windows, so this runs on a windows-latest runner and hands back a downloadable
+# zip. Trigger it by hand from the Actions tab, or push a tag like v1.0.0 to also
+# attach the zip to a GitHub Release.
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+
+concurrency:
+  group: build-windows-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install the app and its build tools
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install faster-whisper pyinstaller pillow
+
+      # Tag builds bake the tag into __version__, so the built app knows what
+      # it is. Without this, an app built from tag v1.0.1 still reports the
+      # hardcoded version and offers itself its own update forever.
+      - name: Stamp the version from the tag
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}".TrimStart("v")
+          $init = "src/plaud_bridge/__init__.py"
+          (Get-Content $init) -replace '__version__ = ".*"', "__version__ = `"$tag`"" | Set-Content $init
+          Select-String -Path $init -Pattern "__version__"
+
+      - name: Draw the icon
+        run: python packaging/make_icon.py
+
+      - name: Fetch ffmpeg and ffprobe
+        shell: pwsh
+        run: |
+          $url = "https://github.com/GyanD/codexffmpeg/releases/download/7.1/ffmpeg-7.1-essentials_build.zip"
+          Invoke-WebRequest -Uri $url -OutFile ffmpeg.zip
+          Expand-Archive ffmpeg.zip -DestinationPath ffmpeg_extracted
+          New-Item -ItemType Directory -Force -Path packaging/bin | Out-Null
+          $bin = Get-ChildItem -Path ffmpeg_extracted -Recurse -Filter "ffmpeg.exe" | Select-Object -First 1
+          Copy-Item $bin.FullName packaging/bin/ffmpeg.exe
+          Copy-Item (Join-Path $bin.DirectoryName "ffprobe.exe") packaging/bin/ffprobe.exe
+          Get-ChildItem packaging/bin
+
+      - name: Build the app
+        run: pyinstaller packaging/PlaudBridge.spec --noconfirm
+
+      - name: Sanity-check the build produced an exe
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "dist/PlaudBridge/PlaudBridge.exe")) {
+            throw "PlaudBridge.exe was not produced"
+          }
+          Get-Item "dist/PlaudBridge/PlaudBridge.exe" | Format-List Name,Length
+
+      - name: Zip it
+        shell: pwsh
+        run: Compress-Archive -Path dist/PlaudBridge/* -DestinationPath PlaudBridge-windows.zip
+
+      # The checksum the in-app updater verifies before installing anything.
+      # A release without this file is refused by the updater on purpose.
+      - name: Publish the checksum
+        shell: pwsh
+        run: |
+          $hash = (Get-FileHash -Algorithm SHA256 PlaudBridge-windows.zip).Hash.ToLower()
+          Set-Content -Path PlaudBridge-windows.zip.sha256 -Value "$hash  PlaudBridge-windows.zip" -NoNewline
+          Get-Content PlaudBridge-windows.zip.sha256
+
+      - name: Upload the download
+        uses: actions/upload-artifact@v4
+        with:
+          name: PlaudBridge-windows
+          path: |
+            PlaudBridge-windows.zip
+            PlaudBridge-windows.zip.sha256
+          retention-days: 30
+
+      - name: Attach to the release (tag builds only)
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            PlaudBridge-windows.zip
+            PlaudBridge-windows.zip.sha256

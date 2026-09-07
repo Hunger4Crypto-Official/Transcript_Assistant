@@ -18,8 +18,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from .diarize.voiceprint import STORE_RELATIVE as VOICEPRINT_STORE
 from .logging_setup import get
-from .models import format_stamp
+from .models import Stage, format_stamp
 from .storage import Vault, VaultError
 
 log = get("archive")
@@ -48,6 +49,11 @@ class SearchResult:
 
     matches: list[Match] = field(default_factory=list)
     unopened: list[str] = field(default_factory=list)
+    # Quarantined recordings are reported apart from unreadable ones. They hold
+    # no searchable content by design -- the gate stopped them before anything
+    # was written -- so telling somebody to check their passphrase, which is
+    # what `unopened` advises, sends them after a problem they do not have.
+    quarantined: list[str] = field(default_factory=list)
     scanned: int = 0
     total: int = 0
     truncated: bool = False
@@ -75,6 +81,11 @@ class ArtifactState:
 class VerifyReport:
     checked: list[ArtifactState] = field(default_factory=list)
     orphans: list[Path] = field(default_factory=list)
+    # Files that live in the vault or the outbox deliberately and are not
+    # artifacts of any recording: voiceprints, saved answers, drafts. They are
+    # counted and named rather than hidden, because a `verify` that quietly
+    # skips whole directories is one you cannot use to find a real orphan.
+    known: list[tuple[Path, str]] = field(default_factory=list)
     unreachable: bool = False       # the vault could not be opened at all
 
     @property
@@ -109,6 +120,15 @@ class VerifyReport:
             if state.detail:
                 lines.append(f"                   {state.detail}")
 
+        if self.known:
+            lines.append("")
+            by_label: dict[str, int] = {}
+            for _path, label in self.known:
+                by_label[label] = by_label.get(label, 0) + 1
+            summary = ", ".join(f"{count} {label}" for label, count in sorted(by_label.items()))
+            lines.append(f"{len(self.known)} file(s) that belong here but are not "
+                         f"artifacts: {summary}.")
+
         if self.orphans:
             lines.append("")
             lines.append(f"{len(self.orphans)} file(s) on disk that the index does not know about:")
@@ -129,6 +149,16 @@ class VerifyReport:
     @property
     def healthy(self) -> bool:
         return not self.problems and not self.unreachable
+
+
+def _labelled(path: Path, expected: list[tuple[Path, str]]) -> str:
+    """The label for a deliberate non-artifact, or "" when this is a real orphan."""
+    resolved = path.resolve()
+    for candidate, label in expected:
+        candidate = candidate.resolve() if candidate.exists() else candidate
+        if resolved == candidate or candidate in resolved.parents:
+            return label
+    return ""
 
 
 def owned_roots(cfg) -> list[Path]:
@@ -180,6 +210,14 @@ class Archive:
 
         Returns None when the content exists but cannot be opened, so callers
         can tell "there is nothing here" apart from "I cannot read what is here".
+
+        A quarantined recording is the third case and reads as the first. The
+        gate stops it before anything is persisted, so the index knows its name
+        and nothing else -- there is no artifact, and there never was one. It
+        used to come back as None, which every caller printed as "could not be
+        opened, set PLAUD_BRIDGE_PASSPHRASE": advice that cannot work, about a
+        problem that does not exist, and an exit code of 2 on every search,
+        export, and answer for as long as the recording sat in quarantine.
         """
         payload = self._payload(row)
         transcript = payload.get("transcript") or {}
@@ -193,6 +231,8 @@ class Archive:
 
         path = str(payload.get("artifact_paths", {}).get("analysis", ""))
         if not path or not Path(path).exists():
+            if str(row.get("stage") or "") == Stage.QUARANTINED.value:
+                return payload
             return None
         try:
             return json.loads(self.vault.read_text(Path(path), row["id"]))
@@ -250,6 +290,9 @@ class Archive:
             segments = self.segments(row)
             if segments is None:
                 unopened.append(f"{row['id']}  {row['source_name']}")
+                continue
+            if not segments and str(row.get("stage") or "") == Stage.QUARANTINED.value:
+                result.quarantined.append(f"{row['id']}  {row['source_name']}")
                 continue
 
             when = (row["recorded_at"] or row["ingested_at"] or "")[:16].replace("T", " ")
@@ -326,14 +369,41 @@ class Archive:
 
             report.checked.append(state)
 
+        expected = self._non_artifacts()
         for root in (self.cfg.path("vault"), self.cfg.path("outbox")):
             if not root.is_dir():
                 continue
             for path in sorted(root.rglob("*")):
-                if path.is_file() and path.resolve() not in indexed:
+                if not path.is_file() or path.resolve() in indexed:
+                    continue
+                label = _labelled(path, expected)
+                if label:
+                    report.known.append((path, label))
+                else:
                     report.orphans.append(path)
 
         return report
+
+    def _non_artifacts(self) -> list[tuple[Path, str]]:
+        """
+        Where the features that are not the pipeline are allowed to write.
+
+        Three things live in the vault or the outbox without belonging to any
+        recording, and every one of them would otherwise be reported as a file
+        the index does not know about, next to advice about rebuilt databases
+        and half-finished runs that could not apply to it. Being told your
+        voiceprints are debris, every time you check the archive is healthy, is
+        how a person learns to skim the one command whose job is to be read.
+
+        Listing them here rather than skipping their directories is deliberate:
+        an unexpected file inside data/vault/ask/ is still an orphan.
+        """
+        vault, outbox = self.cfg.path("vault"), self.cfg.path("outbox")
+        return [
+            (vault / f"{VOICEPRINT_STORE}.enc", "enrolled voiceprints"),
+            (vault / "ask", "saved answers"),
+            (outbox / "drafts", "follow-up drafts"),
+        ]
 
     # =====================================================================
     # Forget
@@ -363,6 +433,16 @@ class Archive:
         if archive.is_dir():
             targets.extend(sorted(archive.glob(f"{recording_id}_*")))
 
+        # Drafts are plaintext markdown destined to leave the machine, and they
+        # carry the recording's commitments plus its id -- in the filename when
+        # a draft was built for one recording, and in a "traced to" footer for a
+        # combined one. Either way `forget` has to reach them.
+        targets.extend(self._drafts_referencing(recording_id))
+
+        # Saved answers quote the recording verbatim. They live encrypted in
+        # vault/ask; the ones that cite this recording go too.
+        targets.extend(self._answers_referencing(recording_id))
+
         seen: set[Path] = set()
         unique: list[Path] = []
         refused: list[Path] = []
@@ -386,13 +466,109 @@ class Archive:
             unique.append(path)
         return unique, refused
 
+    def _drafts_referencing(self, recording_id: str) -> list[Path]:
+        drafts = self.cfg.path("outbox") / "drafts"
+        if not drafts.is_dir():
+            return []
+        hits: list[Path] = []
+        for path in sorted(drafts.iterdir()):
+            if not path.is_file():
+                continue
+            if recording_id in path.name:
+                hits.append(path)
+                continue
+            try:
+                if recording_id in path.read_text(encoding="utf-8", errors="ignore"):
+                    hits.append(path)
+            except OSError:
+                continue
+        return hits
+
+    def _answers_referencing(self, recording_id: str) -> list[Path]:
+        ask_dir = self.cfg.path("vault") / "ask"
+        if not ask_dir.is_dir():
+            return []
+        hits: list[Path] = []
+        for path in sorted(ask_dir.glob("*.enc")):
+            try:
+                # save_answer writes these with an empty AAD (no recording id
+                # is bound, because an answer can cite several); read them the
+                # same way or every decrypt fails and no answer is ever found.
+                payload = json.loads(self.vault.read_text(path, ""))
+            except (VaultError, ValueError, OSError):
+                # Cannot read it (locked/corrupt). The locked-vault refusal in
+                # `forget` stops us reaching here with the vault down; a corrupt
+                # answer is left for `verify` to surface rather than guessed at.
+                continue
+            cited = set(payload.get("recordings_used") or [])
+            cited.update(c.get("recording_id") for c in payload.get("citations") or [])
+            if recording_id in cited:
+                hits.append(path)
+        return hits
+
+    def _derived_stores_present(self, recording_id: str) -> bool:
+        """
+        Whether any ENCRYPTED store that could hold this recording lives on disk.
+
+        These are the stores `forget` cannot purge without the passphrase: the
+        memory ledgers, the saved answers, and the follow-up state file. Their
+        mere presence is what makes a locked-vault forget dangerous -- it would
+        delete the plaintext half and leave the encrypted half behind.
+        """
+        ask = self.cfg.path("vault") / "ask"
+        if ask.is_dir() and any(ask.glob("*.enc")):
+            return True
+        try:
+            from .memory import MemoryStore
+            mem_dir = MemoryStore(self.cfg).dir
+        except Exception:  # noqa: BLE001 - memory is optional; absence is not presence
+            mem_dir = None
+        if mem_dir and Path(mem_dir).is_dir() and any(Path(mem_dir).glob("*.enc")):
+            return True
+        try:
+            from .followups import state_path
+            from .storage.vault import MAGIC as _VAULT_MAGIC
+            state = state_path(self.cfg)
+            # Only an ENCRYPTED state file is a store the passphrase is needed
+            # for. The plaintext fallback (no vault at all) can be read and
+            # purged without one, so it must not force a refusal -- doing so
+            # would make forget impossible for anyone running passphrase-free.
+            if state.exists() and state.read_bytes()[:len(_VAULT_MAGIC)] == _VAULT_MAGIC:
+                return True
+        except Exception:  # noqa: BLE001
+            pass
+        return False
+
     def forget(self, recording_id: str) -> tuple[int, list[str]]:
         """
         Delete a recording and everything belonging to it.
 
+        Fail-safe about the vault. `forget` has to reach encrypted derived
+        stores -- the memory ledgers, saved answers, and follow-up state -- and
+        it cannot open any of them without the passphrase. So if the vault is
+        locked and any of those stores exist, it refuses the WHOLE operation and
+        removes nothing, rather than deleting the plaintext half (files, index
+        row) and stranding the recording's words in an encrypted store it can no
+        longer even name. A red-team pass produced exactly that half-deleted
+        state. Everything the operation touches is recoverable; a half-delete is
+        not.
+
         The audit entry is written BEFORE anything is removed, so a crash
         halfway through still leaves evidence that a deletion was attempted.
         """
+        vault_ok, why = self.vault.ready()
+        if not vault_ok and self._derived_stores_present(recording_id):
+            self.db.audit(
+                "forget_refused",
+                f"vault locked ({why}); refused to half-delete", recording_id, actor="human",
+            )
+            return 0, [
+                "the vault is locked and this recording may have content in the "
+                "memory ledgers, saved answers, or follow-up state. Refusing to "
+                "delete anything rather than leave half of it behind. Set "
+                f"PLAUD_BRIDGE_PASSPHRASE and run forget again. ({why})"
+            ]
+
         targets, refused = self._plan_forget(recording_id)
         self.db.audit(
             "forget",
@@ -421,6 +597,21 @@ class Archive:
                 quarantine.rmdir()
             except OSError as exc:
                 failures.append(f"{quarantine}: {exc}")
+
+        # Encrypted derived stores. The vault is ready (guarded above), so these
+        # can be purged now rather than left to leak the words the files carried.
+        try:
+            from .followups import forget_recording as forget_followups
+            forget_followups(self.cfg, self.vault, recording_id)
+        except Exception as exc:  # noqa: BLE001 - a convenience store, not the record
+            failures.append(f"follow-up state: {exc}")
+        try:
+            from .memory import MemoryStore
+            store = MemoryStore(self.cfg, self.vault)
+            store.forget_recording(recording_id)
+            failures.extend(store.problems)
+        except Exception as exc:  # noqa: BLE001
+            failures.append(f"memory ledgers: {exc}")
 
         self.db.delete_recording(recording_id)
         self.db.audit("forget_complete", f"removed {removed} file(s)", recording_id, actor="human")

@@ -25,6 +25,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+from ..asr.confidence import Assessment
 from ..logging_setup import get
 
 log = get("digest")
@@ -224,6 +225,9 @@ class DigestBuilder:
                         "consent": row["consent_status"],
                         "cost": row["total_cost_usd"] or 0.0,
                         "attention": bool(analysis.get("requires_human_attention")),
+                        "shaky": Assessment.from_dict(
+                            (payload.get("transcript") or {}).get("confidence_report")
+                        ).line(),
                         "fields": analysis.get("fields", {}),
                         "error": analysis.get("error") or unopened,
                         "artifacts": payload.get("artifact_paths", {}),
@@ -237,8 +241,13 @@ class DigestBuilder:
         return sections
 
     # ---- rendering ------------------------------------------------------
-    def render_markdown(self, opts: DigestOptions) -> str:
-        sections = self._collect(opts)
+    def render_markdown(self, opts: DigestOptions,
+                        sections: list[DigestSection] | None = None) -> str:
+        # `sections` lets render_html reuse one _collect for both the text and
+        # the charts, so the two cannot disagree about what the window held.
+        # Left to default, behavior is exactly what it always was.
+        if sections is None:
+            sections = self._collect(opts)
         voice = self.cfg.voice
         now = datetime.now(timezone.utc)
         start = now - timedelta(days=opts.days)
@@ -275,6 +284,11 @@ class DigestBuilder:
         ]
         actions: list[tuple[str, str, str]] = []
         for section in sections:
+            # A profile can suppress next_action like any other field, and a
+            # suppressed field must not render anywhere -- not here at the top of
+            # the digest either. The per-recording loop below honours it too.
+            if "next_action" in self.cfg.profile(section.profile_id).suppress_fields:
+                continue
             for entry in section.entries:
                 na = entry["fields"].get("next_action")
                 if isinstance(na, str) and na.strip() and na.strip().lower() not in ("none", "n/a"):
@@ -342,6 +356,13 @@ class DigestBuilder:
                 separator = voice.get("digest.entry.meta_separator", "` · `")
                 out += ["`" + separator.join(meta) + "`", ""]
 
+                # Before the analysis, not after it. Everything below this line
+                # was extracted from the transcript, so if the transcript is not
+                # trustworthy that has to be read first rather than discovered
+                # in a footnote after you have believed the summary.
+                if entry["shaky"]:
+                    out += [f"> {entry['shaky']}", ""]
+
                 if entry["attention"]:
                     out += [voice.text("digest.entry.attention_note"), ""]
                     continue
@@ -375,7 +396,8 @@ class DigestBuilder:
                         ), ""]
 
                 na = entry["fields"].get("next_action")
-                if isinstance(na, str) and na.strip():
+                if ("next_action" not in profile.suppress_fields
+                        and isinstance(na, str) and na.strip()):
                     out += [voice.text("digest.entry.next_action", action=na.strip()), ""]
 
                 if opts.include_links and entry["artifacts"]:
@@ -415,6 +437,23 @@ class DigestBuilder:
 
         out += voice.lines("digest.footer.sign_off")
         return "\n".join(out)
+
+    def render_html(self, opts: DigestOptions, title: str = "Digest") -> str:
+        """
+        The digest as a self-contained page, with charts.
+
+        The page body is still the markdown, converted (html.py), so the two
+        formats cannot drift into saying different things. The charts are an
+        HTML-only layer drawn from the same collected sections and slotted in
+        after the At a Glance table — they re-plot numbers the text already
+        prints and nothing more. See charts.py for the privacy reasoning.
+        """
+        from .charts import charts_html, inject_charts
+        from .html import to_html
+
+        sections = self._collect(opts)
+        page = to_html(self.render_markdown(opts, sections=sections), title=title)
+        return inject_charts(page, charts_html(sections, opts, self.cfg.voice))
 
     def _empty_note(self, opts: DigestOptions, voice) -> str:
         """What a section with nothing in it says. Per-profile wording wins."""

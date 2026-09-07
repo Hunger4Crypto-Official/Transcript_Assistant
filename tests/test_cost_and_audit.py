@@ -28,12 +28,22 @@ CALL_COST = 0.01
 # Pricing
 # =========================================================================
 def test_price_uses_the_configured_token_rates(sandbox):
+    """
+    Read the rates from config rather than restating them.
+
+    Pinning the shipped numbers here made this test a second place prices had
+    to be updated, and it failed the day the model changed -- reporting a
+    pricing bug where there was only a stale test. What is worth pinning is
+    that `price` reads config at all.
+    """
     cfg, _ = sandbox
     provider = AnthropicLLM(cfg)
+    rate_in = float(cfg.get("llm.anthropic.usd_per_million_input_tokens"))
+    rate_out = float(cfg.get("llm.anthropic.usd_per_million_output_tokens"))
+    assert rate_in > 0 and rate_out > 0, "the shipped config has no anthropic rates"
 
-    # config ships 3.00 in / 15.00 out per million
-    assert provider.price(1_000_000, 1_000_000) == pytest.approx(18.00)
-    assert provider.price(500_000, 0) == pytest.approx(1.50)
+    assert provider.price(1_000_000, 1_000_000) == pytest.approx(rate_in + rate_out)
+    assert provider.price(500_000, 0) == pytest.approx(rate_in / 2)
     assert provider.price(0, 0) == 0.0
 
 
@@ -66,9 +76,11 @@ def test_anthropic_bills_cache_tokens_rather_than_dropping_them(sandbox, monkeyp
     )
 
     response = AnthropicLLM(cfg).complete("sys", "user")
+    # Fresh, written, and read tokens all counted rather than silently dropped.
     assert response.input_tokens == 2_000_000
-    # 2M in at $3 + 1M out at $15
-    assert response.cost_usd == pytest.approx(21.00)
+    rate_in = float(cfg.get("llm.anthropic.usd_per_million_input_tokens"))
+    rate_out = float(cfg.get("llm.anthropic.usd_per_million_output_tokens"))
+    assert response.cost_usd == pytest.approx(2 * rate_in + rate_out)
 
 
 # =========================================================================
@@ -90,6 +102,46 @@ def test_routing_and_analysis_spend_both_land_on_the_recording(tmp_path, monkeyp
         assert stats.cost_usd == pytest.approx(expected)
     finally:
         pipe.close()
+
+
+def test_asking_a_question_is_spend_that_status_can_see(tmp_path, monkeypatch):
+    """
+    ADR-014 says spend is counted wherever it is incurred. `ask` had a cost and
+    no recording to hang it on, so it was spent without appearing anywhere a
+    person would look -- fifty questions against a cloud model, and `status`
+    still reported only what ingestion had cost.
+    """
+    cfg, _ = build_sandbox(tmp_path, monkeypatch, stub=StubLLM(cost_usd=CALL_COST))
+    drop(cfg, "client-marcus.txt", CLIENT_CALL)
+    pipe = Pipeline(cfg)
+    try:
+        pipe.run()
+        pipeline_cost = pipe.db.stats()["total_cost_usd"]
+    finally:
+        pipe.close()
+
+    from plaud_bridge import ask as ask_module
+    from plaud_bridge.archive import Archive
+    from plaud_bridge.llm.base import LLMResponse
+
+    def fake(cfg_, system, user, local_only=False, max_tokens=None):
+        return ({"answer": "Two quote options by Thursday.", "citations": [],
+                 "confidence": "high", "unanswered": ""},
+                LLMResponse(text="", provider="stub", model="stub-1",
+                            cost_usd=CALL_COST))
+
+    monkeypatch.setattr(ask_module, "complete_json", fake)
+
+    db = Database(cfg.path("database"))
+    try:
+        ask_module.ask("what did I promise Marcus?", cfg, db, Archive(cfg, db))
+        stats = db.stats()
+        assert stats["by_source"]["ask"]["calls"] == 1
+        assert stats["by_source"]["ask"]["cost_usd"] == pytest.approx(CALL_COST)
+        assert stats["pipeline_cost_usd"] == pytest.approx(pipeline_cost)
+        assert stats["total_cost_usd"] == pytest.approx(pipeline_cost + CALL_COST)
+    finally:
+        db.close()
 
 
 def test_a_quarantined_recording_still_counts_toward_run_spend(tmp_path, monkeypatch):
@@ -266,3 +318,34 @@ def test_review_surfaces_expired_artifacts_without_deleting_them(sandbox, capsys
     assert "past their expiry" in out
     assert "retention --execute" in out
     assert all(p.exists() for p in paths), "review deleted something; it only reports"
+
+
+def test_a_billed_but_unparseable_response_still_counts_toward_cost(monkeypatch):
+    """
+    A provider that answered but returned unparseable JSON was billed for the
+    call. When the chain falls through to the next provider, that earlier spend
+    has to travel with it -- otherwise the recording's cost silently undercounts
+    every wasted attempt, and the runaway-loop guardrail never sees it.
+    """
+    from plaud_bridge.llm import registry
+    from plaud_bridge.llm.base import LLMResponse
+
+    class FakeProvider:
+        def __init__(self, name, text, cost):
+            self.name, self._text, self._cost = name, text, cost
+
+        def available(self):
+            return True, "ok"
+
+        def complete(self, system, user, max_tokens=None):
+            return LLMResponse(text=self._text, provider=self.name, model="m",
+                               cost_usd=self._cost)
+
+    chain = [FakeProvider("first", "sorry, here is your answer:", 0.02),
+             FakeProvider("second", '{"ok": true}', 0.05)]
+    monkeypatch.setattr(registry, "build_llm_chain", lambda cfg, local_only: chain)
+
+    data, response = registry.complete_json(cfg=None, system="s", user="u")
+    assert data == {"ok": True}
+    assert response.provider == "second"
+    assert abs(response.cost_usd - 0.07) < 1e-9, "the wasted first-provider spend was dropped"

@@ -154,6 +154,30 @@ def test_new_profile_scaffolds_a_loadable_profile(tmp_path, monkeypatch, capsys)
     assert cfg.profiles["mentor"].digest_heading == "Mentorship"
 
 
+def test_new_profile_name_cannot_inject_yaml(tmp_path, capsys):
+    """
+    The name lands inside a quoted YAML scalar. A value with a quote and a
+    newline would break out and inject structure, or -- more likely for a value
+    the user typed -- just write a file that no longer parses. The scaffold must
+    stay loadable and must not grow a key nobody asked for.
+    """
+    import shutil
+
+    from plaud_bridge.cli import cmd_new_profile
+
+    shutil.copytree("config", tmp_path / "config")
+    evil = 'Mentor"\nhard_local_only: false\nallow_cloud_llm: true\nx: "'
+    args = build_parser().parse_args([
+        "--config", str(tmp_path / "config"), "new-profile", "mentor", "--name", evil,
+    ])
+    assert cmd_new_profile(args) == 0
+
+    # It parses, and the injected keys did not become real settings.
+    cfg = Config.load(tmp_path / "config")
+    assert "mentor" in cfg.profiles
+    assert cfg.profiles["mentor"].name == evil, "the name did not round-trip intact"
+
+
 def test_new_profile_refuses_to_overwrite(tmp_path, capsys):
     import shutil
 

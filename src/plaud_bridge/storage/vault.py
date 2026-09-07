@@ -36,6 +36,15 @@ MAGIC = b"PBV1"
 # needs the plaintext and the ciphertext resident at the same time.
 MAGIC_STREAM = b"PBS1"
 STREAM_CHUNK = 4 * 1024 * 1024
+# A hard ceiling on the chunk size a streamed file may DECLARE in its header, and
+# therefore on how large a single body-length field may ask the reader to
+# allocate. The declared size and the per-chunk length are both attacker-
+# controlled in a tampered file, and `read` preallocates the full requested
+# buffer before the GCM tag is ever checked -- so without this a ~40-byte crafted
+# header forces a multi-gigabyte allocation. 64 MiB is well above the 4 MiB the
+# writer uses while still bounding the damage.
+STREAM_CHUNK_MAX = 64 * 1024 * 1024
+GCM_TAG_LEN = 16
 SCRYPT_N = 2**15
 SCRYPT_R = 8
 SCRYPT_P = 1
@@ -117,12 +126,30 @@ class Vault:
                 "decryption failed. Either the passphrase is wrong or the file has been modified."
             ) from exc
 
+    @staticmethod
+    def _artifact_aad(recording_id: str, name: str) -> bytes:
+        """
+        Bind a ciphertext to both its recording and its filename.
+
+        The recording id alone stops a file being swapped between recordings --
+        a Husband transcript planted as an Insurance one -- but it does not stop
+        two artifacts of the SAME recording being swapped, because they share it.
+        A transcript moved on top of the analysis both carry the same id and both
+        decrypt. Folding the basename in closes that: the transcript is bound to
+        `...transcript.md.enc` and the analysis to `...analysis.json.enc`, so
+        neither opens in the other's place. It also binds a saved answer, which
+        carries no recording id at all, to its own filename rather than to the
+        empty string. The name is the last path component only, so it does not
+        depend on where the vault root happens to sit.
+        """
+        return f"{recording_id}\x00{name}".encode()
+
     def write(self, relative: str, data: str | bytes, recording_id: str = "") -> Path:
         payload = data.encode("utf-8") if isinstance(data, str) else data
-        # Bind ciphertext to its recording id so files cannot be silently
-        # swapped between recordings.
-        aad = recording_id.encode("utf-8")
         dest = self.root / f"{relative}.enc"
+        # Bind ciphertext to its recording id AND its filename, so files cannot
+        # be swapped between recordings or between artifacts of one recording.
+        aad = self._artifact_aad(recording_id, dest.name)
         dest.parent.mkdir(parents=True, exist_ok=True)
         tmp = dest.with_name(dest.name + ".tmp")
         tmp.write_bytes(self.encrypt_bytes(payload, aad))
@@ -212,7 +239,20 @@ class Vault:
                 return
 
             salt = fin.read(SALT_LEN)
-            fin.read(4)                       # chunk size, informational
+            raw_chunk_size = fin.read(4)
+            if len(salt) != SALT_LEN or len(raw_chunk_size) != 4:
+                raise VaultError("vault stream header is truncated")
+            # The header's declared chunk size is what bounds every body read
+            # below. It is attacker-controlled in a tampered file, so it is
+            # itself bounded before it is trusted -- otherwise it just moves the
+            # unbounded allocation up one line.
+            chunk_size = int.from_bytes(raw_chunk_size, "big")
+            if not 0 < chunk_size <= STREAM_CHUNK_MAX:
+                raise VaultError(
+                    "vault stream declares an implausible chunk size; the file is "
+                    "corrupt or not a vault stream."
+                )
+            max_body = chunk_size + GCM_TAG_LEN
             key = self._derive(salt)
             aes = AESGCM(key)
 
@@ -225,7 +265,19 @@ class Vault:
                 raw = fin.read(4)
                 if len(nonce) != NONCE_LEN or len(raw) != 4:
                     raise VaultError("vault file is truncated mid-chunk")
-                body = fin.read(int.from_bytes(raw, "big"))
+                body_len = int.from_bytes(raw, "big")
+                # A body is one plaintext chunk plus the 16-byte GCM tag, so it
+                # cannot exceed max_body and cannot be smaller than a tag. Reject
+                # an out-of-range length BEFORE read() preallocates it, which is
+                # the whole point: no ~4 GiB buffer from a crafted length field.
+                if not GCM_TAG_LEN <= body_len <= max_body:
+                    raise VaultError(
+                        "vault chunk length is out of range; the file is corrupt "
+                        "or has been tampered with."
+                    )
+                body = fin.read(body_len)
+                if len(body) != body_len:
+                    raise VaultError("vault file is truncated mid-chunk")
 
                 # Try "not final" first, then "final". The AAD is what makes a
                 # dropped or reordered chunk fail rather than silently
@@ -246,6 +298,15 @@ class Vault:
                         "passphrase is wrong or the file has been modified."
                     )
                 if saw_final:
+                    # The final chunk is authenticated as final, but nothing yet
+                    # says it is the LAST byte in the file. Bytes appended after
+                    # it -- a spliced-on extra chunk, padding -- would otherwise
+                    # be silently ignored, so a modified file reads as intact.
+                    if fin.read(1):
+                        raise VaultError(
+                            "vault file has data after its final chunk; it has "
+                            "been modified."
+                        )
                     break
                 index += 1
 
@@ -254,6 +315,22 @@ class Vault:
                     "vault file ended without its final chunk; it has been "
                     "truncated. Refusing to hand back a partial recording."
                 )
+
+    def iter_plaintext(self, path: Path, recording_id: str = ""):
+        """
+        Yield an artifact's plaintext chunk by chunk, writing nothing anywhere.
+
+        This is the public face of `_stream_plaintext`, and it exists for the
+        media server: playing a recording in the app means piping decrypted
+        bytes straight into an HTTP response, and every prior reader either
+        wrote a file (`read_stream`) or discarded the bytes (`verify_stream`).
+        It handles both on-disk formats -- the chunked PBS1 stream and the
+        one-shot PBV1 blob -- because the caller found a path in the index and
+        should not have to care which writer produced it. All of the stream
+        format's honesty guarantees apply: a reordered, truncated, or tampered
+        file raises VaultError rather than yielding a quietly shorter file.
+        """
+        yield from self._stream_plaintext(Path(path), recording_id)
 
     def read_stream(self, path: Path, dest: Path, recording_id: str = "") -> Path:
         """Decrypt a streamed artifact to a file, a chunk at a time."""
@@ -291,7 +368,10 @@ class Vault:
             return False
 
     def read(self, path: Path, recording_id: str = "") -> bytes:
-        return self.decrypt_bytes(Path(path).read_bytes(), recording_id.encode("utf-8"))
+        path = Path(path)
+        return self.decrypt_bytes(
+            path.read_bytes(), self._artifact_aad(recording_id, path.name)
+        )
 
     def read_text(self, path: Path, recording_id: str = "") -> str:
         return self.read(path, recording_id).decode("utf-8")

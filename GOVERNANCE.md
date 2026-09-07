@@ -396,6 +396,206 @@ worse than one with no search at all, because you believe it.
 
 ---
 
+## ADR-022: A speaker is named only when the model is not close to wrong
+
+**Decision.** Identification puts a name on a diarized cluster only when the
+similarity clears an absolute threshold AND beats the runner-up by a margin. A
+person is used at most once per recording. Everything else stays `Speaker N`.
+
+**Why.** A name is believed. `Speaker 2` is read as a placeholder and checked
+against memory; "Marcus" is read as fact, quoted into a follow-up, and acted on
+six months later by someone who was not in the room. The two failure modes are
+not symmetric, so the guards are not symmetric either.
+
+The margin exists because the nearest-neighbour framing is misleading on the
+recordings this tool is actually for. Family members sound alike. So do a father
+and a son on a phone speaker. When two enrolled people score 0.61 and 0.60, the
+model has not identified anybody; it has produced a tie and a rounding error.
+
+The one-name-per-recording rule follows from the same reasoning: a single voice
+cannot be two people in one room, so if two clusters both want the same name,
+at most one of them can be right.
+
+---
+
+## ADR-023: Voiceprints are encrypted or they are not stored
+
+**Decision.** Enrollment requires a working vault passphrase. There is no
+plaintext fallback, no `--force`, and no config key to ask for one. Without a
+passphrase, `speakers enroll` refuses.
+
+**Why.** Everywhere else in this project, an unavailable vault degrades to
+"process the low-sensitivity profiles only". That reasoning does not transfer.
+A voiceprint is biometric data about people who did not install this software
+and mostly do not know it exists — clients, kids, a spouse. A plaintext
+`voiceprints.json` is a biometric database in a user directory, backed up to
+wherever that directory syncs.
+
+The consistent choice with ADR-019 is that the unsafe option is the one that
+does not ship at all.
+
+---
+
+## ADR-024: A citation names something that was actually sent, or it is dropped
+
+**Decision.** `ask` validates every citation the model returns against the
+bundle it was given. A citation naming a recording that was not in the bundle is
+dropped and reported by id. A citation whose timestamp does not exist is snapped
+to the retrieved excerpt whose words best match the quote, never to a number the
+model chose.
+
+**Why.** The whole value of answering from an archive is that the answer is
+anchored to something that was said. A fabricated citation inverts that: it
+makes an invented claim *more* believable than an uncited one, because it comes
+with a recording id and a timestamp that look checkable and are not.
+
+This is the one failure mode that would make the feature worse than the search
+it replaces, so it is verified by deleting the check and confirming the tests go
+red rather than by reading the code and being satisfied.
+
+---
+
+## ADR-025: Drafting has no send path, by construction
+
+**Decision.** `followups --draft` writes a file into the outbox. There is no
+SMTP client, no mail API, no address book, and no configuration key that would
+enable one. Drafts are redacted before they are written regardless of the
+profile's `redact_before_llm` setting.
+
+**Why.** The feature this replaces auto-summarises a meeting and mails it out.
+The useful half is having the message written; the half worth refusing is
+software deciding, unattended, that a summary of a private conversation should
+leave the machine and go to a named person. A confirmation prompt is not the
+answer, because the failure is not "the user did not notice", it is "the user
+noticed on the fourth of four occasions".
+
+Unconditional redaction diverges from `export`, deliberately. A profile turning
+redaction off is a statement about its own analysis, which stays here. A draft
+is outbound by definition.
+
+---
+
+## ADR-026: Memory is derived, never authoritative
+
+**Decision.** The per-profile ledgers are built only from analyses already
+stored, hold no content the archive does not, and can be discarded and rebuilt
+from the archive at any time. `memory --rebuild` reproducing the ledger is a
+test, not a convenience. `forget` clears memory as part of the same command.
+
+**Why.** A ledger that could not be rebuilt would have become a second copy of
+your recordings — one that no retention sweep expires, `verify` never checks,
+and `forget` does not reach. That is the exact shape of the thing this project
+exists to avoid, arrived at by accident rather than by decision.
+
+Profile isolation is enforced by encrypting each ledger under its own AAD rather
+than by the code being careful. Care is a property of the code as written today;
+a decryption that fails is a property of the file.
+
+---
+
+## ADR-027: A commitment closes only when something says it was done
+
+**Decision.** An open commitment is closed by a later recording that names it as
+completed, in a declared closure field. It is never closed by its words coming
+up again, by time passing, or by a similar commitment appearing.
+
+**Why.** Both errors are possible and only one is recoverable. A commitment left
+open after it was kept is visible: it sits in `followups` and you close it. A
+commitment closed because the topic was mentioned again disappears silently, and
+what disappears is a promise you made to a client or a child.
+
+---
+
+## ADR-028: A transcript the recogniser was guessing at says so first
+
+**Decision.** Every segment's average log probability and no-speech probability
+are read after transcription. A transcript scoring badly is marked, audited, and
+announced in the digest **above** the analysis, and the extraction prompt is
+instructed to prefer empty fields over interpretation. Nothing is deleted and no
+recording is refused.
+
+**Why.** Speech recognition does not decline. Given music, a restaurant, a
+recital, or a device in a pocket, it returns fluent, well-punctuated English
+that nobody said. That is not a rough transcript with mistakes in it; it is
+invented text, identical in shape to the real thing.
+
+That matters more here than it would in a transcription tool, because nothing
+downstream treats the transcript as provisional. The router files it, the
+extractor pulls promises out of it, memory carries those promises into next
+month's prompt, and the worklist puts them in front of you as things you owe a
+client. A hallucinated sentence does not stay a sentence. It becomes a
+commitment you believe you made, six months after the audio is gone.
+
+The scores have been collected since the first version and read by nothing.
+
+**Constraints.** Judgement is weighted by duration, not by segment count: four
+minutes of invented music is one segment and twenty honest interjections are
+twenty, and counting them equally lets the thing that matters lose the vote. A
+transcript with no scores at all -- imported text -- is reported as *unknown*
+rather than clean, because calling it clean claims a check that never ran. The
+warning is placed last in the prompt, beside the instruction, since a caveat
+given as background gets noted and then extracted from confidently anyway.
+
+**What this is not.** It is not a quality gate. A quiet conversation in a car
+scores badly and is still the conversation you wanted, and deciding a recording
+is worthless is not a call to make automatically. The thresholds are guesses
+that have been tuned against nothing; they are config, and they are worth
+checking against your own microphone before either number is trusted.
+
+---
+
+## ADR-029: A quote is findable in the transcript, or it is dropped
+
+**Decision.** Every field the schema types as a `quote` is checked against the
+exact text the model was shown. Anything not present verbatim -- after
+normalising case, punctuation, and whitespace -- is dropped and counted, not
+flagged and kept.
+
+**Why.** This is ADR-024 applied one layer up, and it matters more here. A
+fabricated citation in `ask` sits next to an answer you are already reading
+critically. A fabricated quote is attributed to a named person, flows into the
+memory ledger as something they said, and can surface in a digest a year later
+when the audio is gone. Nothing downstream re-checks it.
+
+Checking against the text the model was **shown** — not the raw transcript — is
+the load-bearing detail. Compliance redacts before the model sees anything, so
+the model can only quote redacted text; validating against the original would
+condemn every legitimate quote from a redacted recording.
+
+**On dropping rather than flagging.** The schema calls the field a quote and the
+prompt demands the speaker's exact words, so a passage that is not present is
+not a quote — it is a paraphrase wearing quotation marks and a timestamp. An
+empty field reads as "nothing worth keeping was said." An invented one reads as
+testimony. Only one of those is recoverable.
+
+---
+
+## ADR-030: The prompt is built so the cache can work
+
+**Decision.** A profile's system prompt, persona, and schema are sent as one
+cached block; the transcript travels in the user turn and never inside it. No
+sampling parameter is sent to Anthropic at all.
+
+**Why.** Caching is a prefix match: the stable half has to come first, and one
+changed byte ahead of the marker invalidates everything after it. The system
+half is byte-identical across every recording and every episode of every
+recording, so without this the same few thousand tokens are paid at full price
+forever. Cache reads bill at a fraction of fresh input.
+
+The sampling parameter is a separate story with the same shape. `temperature`
+was pinned to 0.0 for determinism it never actually provided; on the current
+models it is rejected outright, so it was not a harmless leftover but a 400 on
+the first call after any model upgrade. It is gone, and the output contract in
+the extraction prompt does that job instead.
+
+**Constraint.** This is Anthropic-specific and deliberately not generalised. The
+Groq path keeps its `temperature` and sends no `cache_control` — the parameter
+removal happened on one vendor's models, not on every endpoint that speaks the
+same wire format, and quietly "fixing" the other provider would change its
+behaviour for no reason.
+
+---
+
 ## Known limitations
 
 1. **Crosstalk breaks diarization.** When two people talk over each other,
@@ -429,6 +629,29 @@ worse than one with no search at all, because you believe it.
 
 7. **This runs on one machine.** No multi-device sync, no server. That is a
    deliberate scope boundary, not an oversight.
+
+8. **Speaker identification degrades with the room, not gracefully.** A
+   voiceprint enrolled from a quiet clip matches poorly against a car, a
+   restaurant, or a phone speaker. Enroll two or three clips from the places you
+   actually record. The default threshold is a starting point, not a
+   calibration: run `speakers identify` on your own audio and read the scores
+   before trusting any of it.
+
+9. **Quote verification is exact, not fuzzy.** ADR-029 forgives case,
+   punctuation, and whitespace and nothing else. A model that lightly rewords
+   ("I will" for "I'll") has its quote dropped. That is the intended reading of
+   a field typed `quote`, but it means the count is a measure of paraphrasing as
+   well as of invention.
+
+10. **The confidence thresholds are unvalidated.** ADR-028 reads the
+   recogniser's own scores, but `-1.0` and `0.6` are starting points chosen
+   from the shape of the distribution, not from your recordings. Run a few real
+   files through and compare `open <id> --kind transcript` against the audio
+   before trusting either the warnings or their absence.
+
+11. **Crosstalk defeats identification the same way it defeats diarization.** A
+   cluster containing two overlapping voices embeds to something that is neither
+   of them, which the margin guard will usually reject. Usually.
 
 ---
 

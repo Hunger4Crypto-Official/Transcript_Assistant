@@ -93,8 +93,20 @@ class ConsentResult:
 
 
 def _is_owner(speaker: str, owner_label: str) -> bool:
+    """
+    Whether a speaker label is the owner's, by exact match.
+
+    Exact, not substring. Speaker labels are not trustworthy identity: an
+    imported VTT or SRT names its own speakers, and even diarization's labels
+    are only as good as the clustering. The old test was `owner_label in
+    speaker`, which let "Not Sasson", "Sasson's assistant", or a spoofed
+    "Sassonx" pass as the owner -- and the one thing this decides is whose "I'm
+    recording this" counts as YOU announcing it. Diarization labels the owner's
+    own segments with exactly `owner_label`, so nothing legitimate is lost by
+    refusing the lookalikes.
+    """
     a, b = speaker.strip().lower(), owner_label.strip().lower()
-    return bool(a) and bool(b) and (a == b or b in a)
+    return bool(a) and bool(b) and a == b
 
 
 def detect_consent(transcript: Transcript, window_seconds: float = 90.0,
@@ -111,10 +123,15 @@ def detect_consent(transcript: Transcript, window_seconds: float = 90.0,
         if any(rx.search(seg.text) for rx in _REFUSE_RE):
             result.refused = True
             result.refusal_quote = seg.text.strip()[:300]
+            # The note is written to the plaintext audit trail and the quarantine
+            # WHY.md, so it must NOT carry the verbatim words -- for an encrypted
+            # recording that would put transcript speech in the clear. The quote
+            # itself lives in refusal_quote, which the caller keeps in a withheld
+            # field.
             result.notes.append(
-                "someone objected to being recorded in the opening window: "
-                f'"{result.refusal_quote}". Consent cannot be inferred from a '
-                "refusal, and the answer to a refusal is not a config change."
+                "someone objected to being recorded in the opening window. Consent "
+                "cannot be inferred from a refusal, and the answer to a refusal is "
+                "not a config change."
             )
             log.warning("refusal detected in the consent window")
             return result
@@ -144,9 +161,10 @@ def detect_consent(transcript: Transcript, window_seconds: float = 90.0,
 
     if announce_idx is None:
         if announced_by_other:
+            # No verbatim quote in the note: it reaches the plaintext audit trail.
             result.notes.append(
-                f'the recording was announced by someone other than {owner_label}: '
-                f'"{announced_by_other}". That is them telling you they are '
+                f"the recording was announced by someone other than {owner_label}. "
+                "That is them telling you they are "
                 "recording, not you obtaining their consent."
             )
         else:

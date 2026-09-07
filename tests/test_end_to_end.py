@@ -14,6 +14,7 @@ from pathlib import Path
 
 from _fixtures import CLIENT_CALL, FAMILY_DINNER
 from _fixtures import drop as _drop
+from plaud_bridge.db import Database
 from plaud_bridge.digest import DigestBuilder, DigestOptions
 from plaud_bridge.models import Stage
 from plaud_bridge.pipeline import Pipeline
@@ -116,6 +117,36 @@ def test_missing_consent_quarantines(sandbox):
         pipe.close()
 
 
+def test_forcing_a_quarantined_file_again_does_not_orphan_a_second_folder(sandbox):
+    """
+    `--force` means process this file again, not pretend it is a different file.
+
+    It used to mint a fresh recording id, which wrote a second quarantine folder
+    and then failed to index it because content_hash is UNIQUE -- leaving a
+    folder on disk under an id that no index knew about, so `status`, `audit`,
+    and `review` never mentioned it while `release` would still have put it back
+    in the inbox.
+    """
+    cfg, _ = sandbox
+    no_consent = CLIENT_CALL.split("\n", 2)[2]
+    _drop(cfg, "client-no-consent.txt", no_consent)
+
+    pipe = Pipeline(cfg)
+    try:
+        assert pipe.run().quarantined == 1
+        first = {p.name for p in cfg.path("quarantine").iterdir()}
+        assert len(first) == 1
+
+        # The file is still in the inbox, because quarantine does not archive it.
+        assert pipe.run(force=True).quarantined == 1
+        assert {p.name for p in cfg.path("quarantine").iterdir()} == first
+
+        indexed = {row["id"] for row in Database(cfg.path("database")).query(limit=50)}
+        assert first <= indexed, "a quarantine folder exists that the index does not know about"
+    finally:
+        pipe.close()
+
+
 def test_dedupe_skips_identical_file(sandbox):
     cfg, _ = sandbox
     _drop(cfg, "client-marcus.txt", CLIENT_CALL)
@@ -168,5 +199,61 @@ def test_digest_surfaces_next_actions_at_the_top(sandbox):
         needs = md.split("## At a Glance")[0]
         assert "Needs You" in needs
         assert "Send two quote options by Thursday" in needs
+    finally:
+        pipe.close()
+
+
+def test_force_reprocess_purges_a_prior_runs_files(sandbox):
+    """
+    Reprocessing can move a recording from the plaintext outbox into the vault,
+    or send it to quarantine so it never persists at all, and the previous run's
+    files do not move themselves. A --force run clears them first; otherwise a
+    re-encrypted recording leaves its old plaintext copy on disk, which is the
+    exact thing the encryption existed to prevent.
+    """
+    cfg, _ = sandbox
+    _drop(cfg, "client-marcus.txt", CLIENT_CALL)
+    pipe = Pipeline(cfg)
+    try:
+        pipe.run()
+        rec_id = pipe.db.query()[0]["id"]
+
+        # Plant the kind of file a prior run under a plaintext profile would have
+        # stranded: a plaintext transcript in the outbox, indexed to this id.
+        stale = cfg.path("outbox") / f"{rec_id}.old-transcript.md"
+        stale.parent.mkdir(parents=True, exist_ok=True)
+        stale.write_text("Marcus: the mortgage is about four hundred thousand\n",
+                         encoding="utf-8")
+        pipe.db.record_artifact(rec_id, "stale_transcript", str(stale), False, None)
+        assert stale.exists()
+
+        # The original was archived out of the inbox on the first run; re-drop it
+        # so the forced run has something to reprocess.
+        _drop(cfg, "client-marcus.txt", CLIENT_CALL)
+        pipe.run(force=True)
+
+        assert not stale.exists(), "a --force reprocess left a prior run's plaintext on disk"
+    finally:
+        pipe.close()
+
+
+def test_a_suppressed_next_action_never_renders(sandbox):
+    """
+    suppress_fields must keep a field out of the digest entirely. next_action is
+    rendered from two places -- the top-of-digest 'needs you' actions and each
+    recording's own block -- and both must honour suppression, or a profile that
+    hides next_action still leaks it.
+    """
+    cfg, _ = sandbox
+    _drop(cfg, "client-marcus.txt", CLIENT_CALL)
+    pipe = Pipeline(cfg)
+    try:
+        pipe.run()
+        prof = cfg.profile("insurance_agent")
+        prof.suppress_fields = list(prof.suppress_fields) + ["next_action"]
+        md = DigestBuilder(cfg, pipe.db).render_markdown(DigestOptions(days=30))
+        assert "Send two quote options by Thursday" not in md, (
+            "a suppressed next_action still rendered into the digest"
+        )
     finally:
         pipe.close()

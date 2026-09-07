@@ -113,6 +113,7 @@ class LocalWhisperASR(ASRProvider):
                     end=float(seg.end) + offset,
                     text=text,
                     confidence=getattr(seg, "avg_logprob", None),
+                    no_speech=getattr(seg, "no_speech_prob", None),
                 )
             )
 

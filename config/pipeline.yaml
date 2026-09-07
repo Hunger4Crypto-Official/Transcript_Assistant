@@ -8,7 +8,7 @@
 version: 1
 
 paths:
-  # Drop exported Plaud audio (.mp3/.wav) or transcripts (.txt/.srt) here.
+  # Drop audio or transcripts from any recorder or note app here.
   inbox: "./data/inbox"
   # Working scratch. Safe to delete. Rebuilt on demand.
   work: "./data/work"
@@ -24,9 +24,30 @@ paths:
   logs: "./data/logs"
 
 ingest:
-  # Accepted extensions. Audio goes through ASR; text skips straight to analysis.
-  audio_extensions: [".mp3", ".wav", ".m4a", ".flac", ".ogg"]
-  text_extensions: [".txt", ".srt", ".md"]
+  # Accepted extensions. Audio goes through ASR; text skips straight to
+  # analysis. This list is the only gate on the audio side -- ffmpeg normalises
+  # everything to 16k mono WAV regardless of container, so adding a format here
+  # is all it takes to support it.
+  #
+  # The set below covers what note-taking tools actually hand you:
+  #   Plaud, Otter exports .............. .mp3 .wav .txt .srt
+  #   Apple Voice Memos, Google Recorder  .m4a
+  #   Audiobooks/long-form recorders .... .m4b .aiff
+  #   WhatsApp / Telegram voice notes ... .opus .oga .amr
+  #   Zoom / Teams / Meet recordings .... .mp4 .mov .webm (audio is extracted)
+  #   Zoom / Teams / Fireflies / YouTube  .vtt
+  #   Typed notes ....................... .txt .md
+  audio_extensions: [".mp3", ".wav", ".m4a", ".m4b", ".flac", ".ogg", ".oga",
+                     ".opus", ".aac", ".wma", ".amr", ".aiff", ".webm", ".mp4",
+                     ".mov"]
+  text_extensions: [".txt", ".srt", ".vtt", ".md"]
+  # A ceiling on an imported text transcript, read whole into memory before it
+  # is parsed. A real transcript is well under a megabyte -- a day of speech is
+  # a few hundred kilobytes -- so 10 MB is generous and still stops a stray
+  # multi-gigabyte file (a log, a database dump, a wrong drag-and-drop) from
+  # exhausting memory. Audio has its own duration budget below; this is the
+  # text side of the same guard. Raise it if you genuinely import huge exports.
+  max_text_bytes: 10_000_000
   # Content-hash dedupe. A file already in the DB is skipped, never reprocessed.
   dedupe: true
   # Move originals out of inbox after successful processing.
@@ -64,6 +85,13 @@ audio:
   chunk_seconds: 600
   chunk_overlap_seconds: 8
   max_chunk_mb: 20
+  # The longest single recording accepted. Normalising decodes the whole input
+  # to uncompressed 16k mono PCM (~115 MB/hour of scratch) before chunking, so
+  # this bounds both the scratch file and the chunk fan-out. 14 hours clears a
+  # day-long wearable session; a file longer than this is refused before it is
+  # decoded when its container reports a duration, and capped at the budget when
+  # it does not.
+  max_duration_seconds: 50400
 
 asr:
   # Provider order is a fallback chain, not a preference list.
@@ -82,6 +110,31 @@ asr:
     timeout_seconds: 300
     max_retries: 4
     is_cloud: true
+
+  # How much of a transcript the recogniser was guessing at.
+  #
+  # Whisper does not decline. Given a car radio, a restaurant, a recital, or a
+  # device in a pocket, it returns fluent English that nobody said -- and
+  # everything downstream treats the transcript as fact, so an invented sentence
+  # becomes a commitment you believe you made. Nothing here deletes or refuses.
+  # It says so, in the log, in the digest, and in the extraction prompt.
+  confidence:
+    # Average log probability per segment. Clean speech sits above about -0.5;
+    # well below -1.0 the model is guessing. The one most worth moving for your
+    # own microphone -- check `open <id> --kind transcript` against the audio.
+    min_avg_logprob: -1.0
+    # The recogniser's own probability that a span held no speech. High
+    # no-speech alongside fluent text is the hallucination signature.
+    max_no_speech_prob: 0.6
+    # Share of scored speech below those lines before the transcript is called
+    # shaky, and before it is called untrustworthy. Weighted by duration, so
+    # four minutes of invented music does not hide behind a crowd of real
+    # two-second replies.
+    suspect_share: 0.30
+    unreliable_share: 0.60
+    # Too little speech to judge. Calling a ten second note unreliable on two
+    # shaky segments is noise rather than a warning.
+    min_seconds: 20.0
 
   local:
     enabled: true
@@ -109,6 +162,35 @@ diarization:
   assume_owner_is_dominant_speaker: true
   owner_label: "Sasson"
 
+  # ---------------------------------------------------------------------
+  # Named speakers. Diarization can tell three people apart but has never
+  # heard any of them before, so "Speaker 2" is the best it can do alone.
+  # Enroll someone once and their cluster comes back with their name:
+  #
+  #   python run.py speakers enroll "Marcus" --audio clips/marcus.wav
+  #   python run.py speakers identify data/inbox/2026-07-14.mp3
+  #
+  # Voiceprints are stored encrypted in the vault and never leave the machine.
+  # ---------------------------------------------------------------------
+  identify:
+    enabled: true
+    # Local, like everything else here. Needs a HuggingFace token the first
+    # time only, or fetch it ahead with scripts/fetch_models.py --embedding.
+    model: "pyannote/embedding"
+    # Cosine similarity a cluster must reach before it gets a name at all.
+    # Raise it if you see wrong names; lower it if people go unrecognised.
+    # `speakers identify` prints the actual scores, which is the only sane
+    # way to pick this number for your own recordings and your own room.
+    threshold: 0.55
+    # And it must beat the runner-up by this much. Two brothers scoring 0.61
+    # and 0.60 means the model cannot tell them apart on this audio, and a
+    # coin flip would put a wrong name on a transcript somebody will believe.
+    margin: 0.08
+    # Clusters with less speech than this are not guessed at.
+    min_speech_seconds: 3.0
+    # How many of a cluster's longest spans to average into one vector.
+    max_crops: 8
+
 llm:
   # Token rates below are what feed cost.halt_usd_per_run. They are a guardrail,
   # not an invoice: they are read from the usage each provider reports, and a
@@ -121,16 +203,32 @@ llm:
     enabled: true
     api_key_env: "ANTHROPIC_API_KEY"
     base_url: "https://api.anthropic.com/v1"
-    model: "claude-sonnet-4-6"
+    model: "claude-opus-5"
     version_header: "2023-06-01"
-    max_tokens: 8000
-    temperature: 0.0
+    # Thinking is on by default on this generation and shares this ceiling with
+    # the response, so a budget sized around the JSON alone truncates mid-object.
+    max_tokens: 16000
+    # NOTE: there is no temperature here and adding one back is a 400, not a
+    # no-op -- the sampling parameters were removed on this generation. It was
+    # pinned to 0.0 for determinism, which it never actually guaranteed; the
+    # output contract in the extraction prompt does that job.
+    #
+    # Reasoning depth, and the cost lever that replaced the token budget:
+    # low | medium | high | xhigh | max. Extraction is a read-and-fill task
+    # against a transcript rather than an open reasoning problem, so it does not
+    # want the ceiling. Raise it if analyses read as shallow on hard recordings.
+    effort: "medium"
+    # Send the profile's system prompt as a cached block. It is byte-identical
+    # across every recording and every episode, so without this the same few
+    # thousand tokens are paid for at full price forever. Cache reads bill at a
+    # fraction of fresh input.
+    cache_system_prompt: true
     timeout_seconds: 180
     max_retries: 4
     is_cloud: true
     # Verify at anthropic.com/pricing.
-    usd_per_million_input_tokens: 3.00
-    usd_per_million_output_tokens: 15.00
+    usd_per_million_input_tokens: 5.00
+    usd_per_million_output_tokens: 25.00
 
   groq:
     enabled: true
@@ -280,3 +378,124 @@ runtime:
   offline: false
   # Where local model weights live. Relative paths resolve against the project.
   models_dir: "./models"
+
+followups:
+  # Commitments become a worklist, and a worklist becomes a DRAFT that you send
+  # yourself. There is no mail configuration in this block because the code has
+  # no way to use one. That is the design, not an omission.
+
+  # Which extraction fields hold something somebody owes somebody. Matched
+  # against each field's key AND its label, so `promises_i_made`,
+  # `commitments_by_producer`, `action_items`, and "What They Asked For" are all
+  # found without being named. Add a token when a new profile calls it something
+  # these do not reach.
+  field_tokens: ["commitment", "promise", "action", "follow_up", "followup",
+                 "task", "todo", "asked_for", "asks_from", "next_step"]
+  # Name the fields outright for one profile when the tokens cannot reach them.
+  # An explicit list wins over field_tokens, for that profile only.
+  # fields:
+  #   father: ["promises_i_made", "next_action"]
+
+  # How many recordings the worklist opens. There is deliberately no default day
+  # window -- a promise does not stop counting because it is old -- so this is
+  # the bound instead.
+  max_recordings: 500
+  # A commitment longer than this is truncated. The id is derived from the text,
+  # so changing this re-ids anything it was truncating and those items will look
+  # new once.
+  max_text_chars: 400
+
+  # Let an LLM phrase a draft when one is reachable. Off is not a degraded mode:
+  # the template path is deterministic, needs no network, and is frequently the
+  # better output. Either way the strictest profile in the draft decides whether
+  # a cloud model may see it at all, and one locked profile locks the whole draft.
+  draft_with_llm: true
+  draft_max_tokens: 1200
+  # Ceiling on how many follow-ups go into one draft. A message listing forty
+  # things is not a follow-up, it is an invoice.
+  max_per_draft: 25
+
+ask:
+  # Conversational question answering over the archive. Retrieval first: the
+  # ranking below is deterministic and runs with no model configured at all,
+  # which is also the fallback. Without a usable provider `ask` returns the
+  # excerpts and says plainly that they are search output rather than an answer.
+
+  # How far back a question looks by default. 0 searches the whole archive.
+  days: 90
+  # How many recordings may contribute to one answer. Past a handful the model
+  # starts averaging conversations together instead of citing one of them.
+  limit: 6
+  # How many recordings may be OPENED while ranking. This bounds work, not
+  # results, exactly like search's --scan-limit, and a bounded answer says it
+  # was bounded. 0 opens everything in the window.
+  scan_limit: 200
+  # The context ceiling, in characters. Excerpts past it are dropped in ranked
+  # order, and both the prompt and the answer say how many. Raise it if your
+  # local model has the room; a bigger bundle is not automatically a better
+  # answer, and it is always a slower one.
+  max_context_chars: 24000
+  # Excerpts taken from any one recording, and how many neighbouring segments
+  # travel with each. A promise usually spans two turns, so one either side is
+  # the difference between a quote and a fragment.
+  excerpts_per_recording: 4
+  excerpt_context: 1
+  # Ranking. Term coverage dominates and everything else is a tie-break.
+  # Recency is deliberately weak: a client from March should not lose to last
+  # Tuesday's coffee on the grounds that Tuesday is nearer.
+  min_term_length: 3
+  recency_half_life_days: 30
+  recency_weight: 0.25
+  # A hit inside a stored analysis is worth more than one in raw speech,
+  # because the analyses are the curated read of the same conversation.
+  analysis_weight: 0.5
+  # A "quoted phrase" in the question triggers an exact-substring pass through
+  # the same search that `search --content` uses, and recordings it finds are
+  # promoted by this much. It costs a second pass over the archive, so it only
+  # runs when the question actually contains quotes.
+  phrase_bonus: 2.0
+  # Output ceiling for the answer itself. An answer is a paragraph and a few
+  # citations; a large number here buys latency and nothing else.
+  max_tokens: 2000
+
+memory:
+  # Learning across recordings. Every ledger is built from analyses that are
+  # already stored, so nothing here costs an LLM call and everything here can be
+  # thrown away and rebuilt from the archive: run.py memory --rebuild
+  enabled: true
+  # One encrypted file per profile. Deliberately not under paths.vault: `verify`
+  # lists anything in the vault the artifact index does not know about, and five
+  # ledgers sitting in that list forever would teach you to skim it.
+  dir: "./data/memory"
+  # The briefing injected into the next extraction prompt is hard-capped at this
+  # many characters, newest and most-mentioned first. A briefing long enough to
+  # compete with the transcript is a briefing that changes the analysis.
+  brief_budget_chars: 1500
+  # How long an entry keeps being surfaced after it was last heard. This is not
+  # deletion -- the entry keeps its provenance and simply stops being carried
+  # forward, because a brief full of things that stopped being true is worse
+  # than a short one. 0 means never expire.
+  decay_days:
+    commitment: 180
+    person: 120
+    topic: 90
+    fact: 365
+  # An unkept promise is the thing you most want carried forward, so it outranks
+  # an equally-mentioned subject by this much.
+  commitment_boost: 2.0
+  # Caps on how much one recording can contribute. A single talkative afternoon
+  # should not fill the ledger.
+  max_entry_chars: 200
+  max_items_per_field: 12
+  # Which drawer an extraction field goes in: commitment, person, topic, fact,
+  # or "ignore". The shipped profiles' fields are already mapped in code; map
+  # your own here. A field nobody has classified is left out rather than guessed
+  # at, and sensitive or suppressed fields are never filed whatever this says.
+  field_kinds: {}
+  ignore_fields: []
+  # A commitment is closed only by a later recording that says it was done, in
+  # one of these fields. Declare one in a profile's extraction schema to use it.
+  # Deciding a promise was kept because its words came up again would be
+  # inventing, and a stale open commitment is the cheaper mistake by far.
+  closure_fields: ["completed", "closed_items", "delivered", "done", "resolved"]
+  closure_overlap: 0.75

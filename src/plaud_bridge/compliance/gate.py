@@ -58,7 +58,19 @@ class ComplianceGate:
         # The single place this is decided. Persistence and the index both read
         # it from here, so they cannot disagree about whether this recording's
         # content is safe to keep in the clear.
-        verdict.encrypt_at_rest = governing.encrypt_at_rest
+        #
+        # Encryption at rest is a FLOOR, not a routing preference: if any matched
+        # profile wants its content encrypted, the recording is encrypted --
+        # exactly like force_local_processing below, and for the same reason.
+        # Tying it to `governing` alone meant that with strictest_profile_governs
+        # turned off, a recording co-routed to Husband but led by a work profile
+        # was stored in plaintext, because the work profile happened to sort
+        # first. The locality floor already ignores that flag; this one must too.
+        verdict.encrypt_at_rest = governing.encrypt_at_rest or any(
+            self.cfg.profile(pid).encrypt_at_rest
+            for pid in profile_ids
+            if pid in self.cfg.profiles
+        )
 
         if len(profile_ids) > 1 and self.strictest_governs:
             verdict.reasons.append(
@@ -119,7 +131,25 @@ class ComplianceGate:
                 self.window,
                 owner_label=self.cfg.get("diarization.owner_label"),
             )
-            if result.complete:
+            if result.refused:
+                # A refusal is categorically different from missing consent, and
+                # it quarantines unconditionally -- the on_missing_consent setting
+                # governs silence, not an objection. Letting a config flag wave a
+                # refusal through is exactly what the consent module warns against.
+                # The verbatim words go in consent_quote, which the index withholds
+                # for an encrypted recording; the reason carries none of them.
+                verdict.consent = ConsentStatus.REFUSED
+                verdict.consent_quote = result.refusal_quote
+                verdict.allow = False
+                verdict.reasons.append(
+                    "QUARANTINED. A party objected to being recorded in the opening "
+                    "window. A refusal is not overridden by compliance."
+                    "on_missing_consent; if consent was not obtained, the answer is "
+                    "not a config change."
+                )
+                log.warning("quarantined for an explicit recording refusal: %s",
+                            rec.source_name)
+            elif result.complete:
                 verdict.consent = ConsentStatus.DETECTED
                 verdict.consent_quote = result.announce_quote
                 verdict.consent_timestamp = result.timestamp

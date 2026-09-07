@@ -62,12 +62,23 @@ def probe_duration(path: Path, ffprobe: str = "ffprobe") -> float:
         # the float(None) escapes as an unexpected error and the user is told
         # "float() argument must be a string or a real number" instead of
         # anything they can act on.
-        return float(json.loads(proc.stdout)["format"]["duration"])
+        seconds = float(json.loads(proc.stdout)["format"]["duration"])
     except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
         raise AudioError(
             f"could not read duration from {path.name}. The file may be truncated "
             "or missing container metadata; try re-exporting it."
         ) from exc
+    # A duration drives the chunk arithmetic and the loop bound in chunk(). A
+    # NaN, an infinity, or a negative -- any of which float() will happily
+    # return from a crafted or corrupt container -- turns that arithmetic into a
+    # non-terminating loop or a nonsense chunk count. Reject them here, once, so
+    # nothing downstream has to defend against them.
+    if not math.isfinite(seconds) or seconds <= 0:
+        raise AudioError(
+            f"{path.name} reports a duration of {seconds}, which is not a positive "
+            "finite number of seconds. The file is corrupt or not really audio."
+        )
+    return seconds
 
 
 class AudioPreparer:
@@ -82,6 +93,12 @@ class AudioPreparer:
         self.chunk_seconds = float(cfg.get("audio.chunk_seconds", 600))
         self.overlap = float(cfg.get("audio.chunk_overlap_seconds", 8))
         self.max_chunk_mb = float(cfg.get("audio.max_chunk_mb", 20))
+        # A ceiling on how long a single recording may be. normalise() decodes
+        # the whole input to uncompressed 16k mono PCM -- ~115 MB/hour -- before
+        # anything else looks at it, so an accidental or malicious 40-hour file
+        # becomes gigabytes of scratch and a chunk fan-out to match. 14 hours is
+        # well past a day-long wearable session and still bounds all of that.
+        self.max_duration = float(cfg.get("audio.max_duration_seconds", 50400))
 
     def check_tools(self) -> None:
         for tool in (self.ffmpeg, self.ffprobe):
@@ -96,6 +113,21 @@ class AudioPreparer:
         work_dir.mkdir(parents=True, exist_ok=True)
         dest = work_dir / f"{src.stem}.norm.wav"
 
+        # Refuse before decoding when the source duration is readable and over
+        # budget: there is no reason to write gigabytes of scratch WAV only to
+        # reject it afterwards. Some containers report no duration, and those
+        # fall through to the -t ceiling below.
+        try:
+            src_duration = probe_duration(src, self.ffprobe)
+        except AudioError:
+            src_duration = None
+        if src_duration is not None and src_duration > self.max_duration:
+            raise AudioError(
+                f"{src.name} is {src_duration / 3600:.1f} hours long, over the "
+                f"audio.max_duration_seconds budget of {self.max_duration / 3600:.1f} "
+                "hours. Raise the limit in config if that is genuinely one recording."
+            )
+
         filters = []
         if self.normalize:
             # Single-pass loudnorm. Two-pass is more accurate but doubles wall
@@ -103,15 +135,29 @@ class AudioPreparer:
             filters.append(f"loudnorm=I={self.lufs}:TP=-1.5:LRA=11")
         filter_arg = ["-af", ",".join(filters)] if filters else []
 
+        # A hard ceiling on the decode itself, a minute past the budget. For a
+        # recording within budget this changes nothing; for a container that
+        # reports no duration it stops ffmpeg writing an unbounded WAV, and the
+        # post-decode check below then rejects it rather than guessing.
+        limit = f"{self.max_duration + 60:.3f}"
         proc = _run([
             self.ffmpeg, "-y", "-hide_banner", "-loglevel", "error",
-            "-i", str(src), "-ac", str(self.channels), "-ar", str(self.sample_rate),
+            "-i", str(src), "-t", limit,
+            "-ac", str(self.channels), "-ar", str(self.sample_rate),
             *filter_arg, "-c:a", "pcm_s16le", str(dest),
         ])
         if proc.returncode != 0 or not dest.exists():
             raise AudioError(f"ffmpeg normalise failed for {src.name}: {proc.stderr.strip()[:400]}")
 
         duration = probe_duration(dest, self.ffprobe)
+        if duration > self.max_duration:
+            # Only reachable for a source whose duration could not be read up
+            # front; the -t ceiling capped the decode near the budget.
+            raise AudioError(
+                f"{src.name} decodes to more than the audio.max_duration_seconds "
+                f"budget of {self.max_duration / 3600:.1f} hours. Its container "
+                "reports no duration, so it was capped at the budget and refused."
+            )
         log.info("normalised %s -> %.1fs @ %dHz mono", src.name, duration, self.sample_rate)
         return dest, duration
 

@@ -185,6 +185,145 @@ def test_an_unencrypted_profile_keeps_its_transcript_in_the_index(tmp_path, monk
     assert "hello there" not in rec.to_json(include_transcript=False)
 
 
+def test_the_withheld_index_leaks_no_transcript_derived_string():
+    """
+    A red-team pass read a client's own words out of the plain SQLite index of
+    an ENCRYPTED recording. Withholding the transcript segments was not enough:
+    the consent quote and the router's evidence phrases are lifted verbatim from
+    the transcript and were riding into payload_json in the clear. The old test
+    greps one phrase that happens to appear in neither, so it missed this.
+    """
+    from plaud_bridge.models import ComplianceVerdict, Recording, RouteMatch, Segment, Transcript
+
+    rec = Recording(source_name="client.txt", kind="text")
+    rec.transcript = Transcript(segments=[
+        Segment(0.0, 5.0, "my elimination period worries me", "Client"),
+        Segment(5.0, 9.0, "the biopsy results came back positive", "Client"),
+    ])
+    rec.compliance = ComplianceVerdict()
+    rec.compliance.consent_quote = "Sure. my elimination period worries me."
+    rec.routes = [RouteMatch(profile_id="insurance_agent", confidence=0.9,
+                             evidence=["biopsy results", "elimination period"])]
+
+    withheld = rec.to_json(include_transcript=False, include_analysis_fields=False)
+    for phrase in ("elimination period", "biopsy results", "worries me"):
+        assert phrase not in withheld, f"withheld index still leaks {phrase!r}"
+
+    # And the clear path is unchanged -- withholding is a response to encryption.
+    clear = rec.to_json(include_transcript=True, include_analysis_fields=True)
+    assert "biopsy results" in clear and "elimination period" in clear
+
+
+class WorkOnlyRouterStub(StubLLM):
+    """Insists every recording is low-sensitivity work, whatever it contains."""
+
+    def __call__(self, cfg, system, user, local_only=False, max_tokens=None):
+        if '"scores"' in user:
+            self.calls.append({"local_only": local_only, "kind": "route"})
+            return {"scores": [
+                {"profile_id": "father", "score": 0.03, "evidence": []},
+                {"profile_id": "husband", "score": 0.03, "evidence": []},
+                {"profile_id": "sales_trainer", "score": 0.40, "evidence": ["debrief"]},
+                {"profile_id": "insurance_agent", "score": 0.03, "evidence": []},
+            ]}, self._response()
+        self.calls.append({"local_only": local_only, "kind": "extract"})
+        return {"requires_human_attention": False}, self._response()
+
+
+def test_a_strong_family_keyword_match_cannot_be_scored_away(tmp_path, monkeypatch):
+    """
+    Missing a family recording is the asymmetric failure the tool exists to
+    prevent: it could hand that conversation to a cloud model. A transcript dense
+    with Father keywords, where the model insists it is work, must still route to
+    Father -- the locked-profile keyword floor holds the line the model tried to
+    talk past.
+    """
+    from plaud_bridge.profiles.router import route
+
+    cfg, _ = build_sandbox(tmp_path, monkeypatch, stub=WorkOnlyRouterStub())
+    segments = [Segment(i * 4.0, i * 4.0 + 4.0, line, "Sasson")
+                for i, line in enumerate(FAMILY_DINNER.strip().splitlines())]
+    result = route(Transcript(segments=segments), cfg)
+
+    routed = {m.profile_id for m in result.matches}
+    assert "father" in routed, (
+        "a family recording the keywords matched was dropped because the model "
+        "scored it as work; the locked-profile keyword floor did not hold"
+    )
+
+
+class CoRedactStub(StubLLM):
+    """Leads with a cloud-permitting profile and co-routes a redacting one."""
+
+    def __init__(self):
+        super().__init__()
+        self.extract_bodies: list[str] = []
+
+    def __call__(self, cfg, system, user, local_only=False, max_tokens=None):
+        if '"scores"' in user:
+            return {"scores": [
+                {"profile_id": "sales_trainer", "score": 0.95, "evidence": ["debrief"]},
+                {"profile_id": "insurance_agent", "score": 0.90, "evidence": ["fact find"]},
+                {"profile_id": "father", "score": 0.02, "evidence": []},
+                {"profile_id": "husband", "score": 0.02, "evidence": []},
+            ]}, self._response()
+        self.extract_bodies.append(user)
+        return {"requires_human_attention": False}, self._response()
+
+
+def test_redaction_is_a_floor_when_the_lead_profile_does_not_redact(tmp_path, monkeypatch):
+    """
+    Redaction before a cloud model is a floor, like locality and encryption. With
+    strictest_profile_governs off and a lead profile that does not redact, a
+    co-routed profile that does must still force redaction, or PII reaches the
+    model unredacted. (No shipped profile skips redaction; this pins the floor
+    for a custom one that would.)
+    """
+    cfg, stub = build_sandbox(tmp_path, monkeypatch, stub=CoRedactStub(),
+                              overrides={"compliance": {"strictest_profile_governs": False}})
+    cfg.profile("sales_trainer").redact_before_llm = False
+    drop(cfg, "sales_trainer-debrief.txt",
+         "Sasson: My SSN is 123-45-6789 and I record these, is that okay?\n"
+         "Marcus: Yeah that's fine.\n")
+
+    pipe = Pipeline(cfg)
+    try:
+        pipe.run()
+        assert stub.extract_bodies, "no extraction happened"
+        for body in stub.extract_bodies:
+            assert "123-45-6789" not in body, (
+                "PII reached the model because the lead profile skipped redaction"
+            )
+    finally:
+        pipe.close()
+
+
+def test_encryption_at_rest_is_a_floor_not_a_routing_preference(tmp_path, monkeypatch):
+    """
+    strictest_profile_governs is a routing preference; encryption at rest is a
+    floor. With the flag off and a work profile leading the routing, a recording
+    co-routed to a locked personal profile must still be encrypted -- otherwise
+    a Husband conversation lands in the plaintext index because a sales debrief
+    happened to sort first. The locality floor already ignores this flag.
+    """
+    from plaud_bridge.compliance.gate import ComplianceGate
+    from plaud_bridge.models import Recording, RouteMatch
+
+    cfg, _ = build_sandbox(tmp_path, monkeypatch,
+                           overrides={"compliance": {"strictest_profile_governs": False}})
+    rec = Recording(source_name="x.txt", kind="text")
+    rec.transcript = Transcript(segments=[Segment(0.0, 2.0, "hi", "Sasson")])
+    rec.routes = [RouteMatch(profile_id="sales_trainer", confidence=0.95),
+                  RouteMatch(profile_id="husband", confidence=0.90)]
+
+    verdict = ComplianceGate(cfg).evaluate(rec)
+    assert verdict.governing_profile == "sales_trainer", "the flag-off preference did not take effect"
+    assert verdict.encrypt_at_rest is True, (
+        "a Husband-co-routed recording was left unencrypted because a work "
+        "profile led the routing"
+    )
+
+
 # =========================================================================
 # Consent
 # =========================================================================
@@ -212,6 +351,74 @@ def test_a_refusal_is_not_treated_as_consent(tmp_path, monkeypatch):
         pipe.close()
 
 
+def test_a_refusal_quarantines_even_when_missing_consent_is_only_flagged(tmp_path, monkeypatch):
+    """
+    compliance.on_missing_consent governs SILENCE -- nobody said either way. An
+    explicit objection is not silence: a refusal quarantines unconditionally,
+    even with the gate set only to flag missing consent. A config flag must not
+    wave a refusal through.
+    """
+    cfg, _ = build_sandbox(tmp_path, monkeypatch,
+                           overrides={"compliance": {"on_missing_consent": "flag"}})
+    drop(cfg, "client-refused.txt", REFUSAL)
+
+    pipe = Pipeline(cfg)
+    try:
+        stats = pipe.run()
+        assert stats.quarantined == 1, "a refusal was flagged instead of quarantined"
+        assert stats.processed == 0
+    finally:
+        pipe.close()
+
+
+def test_a_refusal_does_not_write_the_refusers_words_to_the_plaintext_index(tmp_path, monkeypatch):
+    """
+    The refusal reason is written to the plaintext audit table and the quarantine
+    WHY.md. It must carry none of the verbatim objection -- that would put
+    transcript speech in the clear. The words live only in the withheld
+    consent_quote.
+    """
+    cfg, _ = build_sandbox(tmp_path, monkeypatch)
+    drop(cfg, "client-refused.txt", REFUSAL)
+
+    pipe = Pipeline(cfg)
+    try:
+        pipe.run()
+    finally:
+        pipe.close()
+
+    needle = b"really don't want this being recorded"
+    assert needle not in cfg.path("database").read_bytes(), (
+        "the refuser's verbatim words reached the plaintext index"
+    )
+    why = cfg.path("quarantine")
+    leaked = [p for p in why.rglob("WHY.md") if needle in p.read_bytes()]
+    assert not leaked, "the refuser's verbatim words reached a plaintext WHY.md"
+
+
+def test_consent_notes_never_carry_the_verbatim_speech():
+    """
+    The notes flow into verdict.reasons, which are written to the plaintext audit
+    trail and WHY.md. Neither a refusal note nor an announced-by-other note may
+    carry the words; those live in the dedicated (withheld) quote fields.
+    """
+    from plaud_bridge.compliance.consent import detect_consent
+
+    refusal = [Segment(0.0, 4.0, "Honestly I really don't want this being recorded.", "Marcus")]
+    r1 = detect_consent(Transcript(segments=refusal), 90.0, owner_label="Sasson")
+    assert r1.refused and r1.refusal_quote, "the refusal and its quote must still be captured"
+    assert "really don't want" not in " ".join(r1.notes), "a note leaked the verbatim refusal"
+
+    other = [
+        Segment(0.0, 4.0, "Morning.", "Sasson"),
+        Segment(4.0, 8.0, "Just so you know, I am recording this call on my end.", "Marcus"),
+    ]
+    r2 = detect_consent(Transcript(segments=other), 90.0, owner_label="Sasson")
+    assert "recording this call on my end" not in " ".join(r2.notes), (
+        "a note leaked the other party's verbatim announcement"
+    )
+
+
 @pytest.mark.parametrize("body,expected", [
     ("Sasson: I record these calls for my notes, is that okay?\n"
      "Marcus: Yeah that's fine.\n", True),
@@ -232,3 +439,38 @@ def test_consent_detection_cases(body, expected):
 
     result = detect_consent(Transcript(segments=segments), 90.0, owner_label="Sasson")
     assert result.complete is expected, result.notes
+
+
+def test_owner_identity_is_an_exact_match_not_a_substring():
+    """
+    Whose announcement counts as YOURS is decided by the speaker label, and a
+    substring test (`owner_label in speaker`) accepted "Not Sasson" and "Sasson's
+    assistant" as the owner. Speaker labels come from diarization or, worse, from
+    an untrusted imported transcript, so a lookalike must not pass.
+    """
+    from plaud_bridge.compliance.consent import _is_owner
+
+    assert _is_owner("Sasson", "Sasson")
+    assert _is_owner(" sasson ", "Sasson"), "case and surrounding space must still match"
+    for impostor in ("Not Sasson", "Sasson's assistant", "Sassonx", "The Sasson"):
+        assert not _is_owner(impostor, "Sasson"), f"{impostor!r} was accepted as the owner"
+
+
+def test_a_lookalike_cannot_announce_the_recording_for_the_owner():
+    """
+    End to end: the real owner is in the room, but the 'I record these' line is
+    spoken by a differently-labelled speaker whose label merely contains the
+    owner's name. That is not the owner announcing, so consent is not announced.
+    """
+    from plaud_bridge.compliance.consent import detect_consent
+
+    segments = [
+        Segment(0.0, 4.0, "Morning, thanks for coming in.", "Sasson"),
+        Segment(4.0, 8.0, "Just so you know, I record these for my notes, okay?",
+                "Sasson's assistant"),
+        Segment(8.0, 12.0, "Yeah, that's fine.", "Marcus"),
+    ]
+    result = detect_consent(Transcript(segments=segments), 90.0, owner_label="Sasson")
+    assert not result.announced, (
+        "an announcement by a lookalike label was accepted as the owner's"
+    )

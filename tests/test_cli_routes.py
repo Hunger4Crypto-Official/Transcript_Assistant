@@ -28,8 +28,9 @@ from plaud_bridge.db import Database
 # check has something to compare the parser against.
 COVERED = {
     "doctor", "run", "watch", "digest", "status", "search", "verify", "forget",
-    "export", "open", "audit", "release", "retention", "profiles",
-    "new-profile", "voices", "review",
+    "export", "open", "audit", "release", "quarantine", "retention", "profiles",
+    "new-profile", "voices", "review", "speakers", "followups", "ask",
+    "memory", "backup", "restore", "insights", "people", "brief", "demo", "app",
 }
 
 
@@ -70,6 +71,26 @@ READ_ONLY = [
     ("status",),
     ("profiles",),
     ("voices",),
+    ("speakers", "list"),
+    ("ask", "what did I promise about the quotes?"),
+    ("ask", "elimination period", "--profile", "insurance_agent"),
+    ("ask", "anything at all", "--include-personal", "--days", "30"),
+    ("ask", "anything at all", "--local-only"),
+    ("memory",),
+    ("memory", "--brief"),
+    ("memory", "--profile", "insurance_agent"),
+    ("insights",),
+    ("insights", "--days", "90"),
+    ("insights", "--profile", "insurance_agent"),
+    ("insights", "--include-personal"),
+    ("followups",),
+    ("followups", "--status", "all"),
+    ("followups", "--format", "html"),
+    ("followups", "--profile", "insurance_agent"),
+    ("people",),
+    ("people", "--days", "30"),
+    ("people", "--include-personal"),
+    ("people", "--format", "html"),
     ("verify",),
     ("review",),
     ("review", "--days", "7"),
@@ -77,6 +98,10 @@ READ_ONLY = [
     ("audit", "--action", "ingest"),
     ("audit", "--actor", "pipeline"),
     ("audit", "--days", "7", "--limit", "5"),
+    ("brief",),
+    ("brief", "--days", "30"),
+    ("brief", "--include-personal"),
+    ("brief", "--format", "html"),
     ("digest",),
     ("digest", "--days", "30"),
     ("digest", "--include-personal"),
@@ -95,6 +120,7 @@ READ_ONLY = [
     ("search", "mortgage", "--content", "--per-recording", "1"),
     ("search", "anything", "--profile", "insurance_agent", "--days", "30", "--limit", "5"),
     ("retention",),
+    ("quarantine",),
     ("doctor",),
     ("doctor", "--offline"),
 ]
@@ -107,6 +133,11 @@ def _acceptable(argv) -> set[int]:
     if argv[0] == "doctor":
         return {0, 1}
     if "--scan-limit" in argv:
+        return {0, 2}
+    # `ask` reports 2 when the answer is incomplete -- a bounded scan, a
+    # trimmed context, a dropped citation. That is an answer with a caveat,
+    # not a crash, and the caveat is the part worth exiting non-zero for.
+    if argv[0] == "ask":
         return {0, 2}
     return {0}
 
@@ -201,6 +232,25 @@ def test_retention_dry_run_deletes_nothing(sandbox):
 
 def test_retention_execute_needs_confirmation(sandbox, monkeypatch):
     assert cli(sandbox, "retention", "--execute", "--yes") == 0
+
+
+def test_backup_writes_one_file_and_restore_guards_existing_data(sandbox, tmp_path):
+    """
+    The route surface only; what backup and restore actually guarantee is
+    pinned down in tests/test_backup.py.
+    """
+    out = tmp_path / "cli-route.pbb"
+    assert cli(sandbox, "backup", "--out", str(out)) == 0
+    assert out.is_file() and out.stat().st_size > 0
+    # Data is already in place, so a bare restore must refuse...
+    assert cli(sandbox, "restore", str(out)) == 1
+    # ...and --force must go through, leaving an archive that still verifies.
+    assert cli(sandbox, "restore", str(out), "--force") == 0
+    assert cli(sandbox, "verify") == 0
+
+
+def test_restore_a_missing_file_fails_cleanly(sandbox, tmp_path):
+    assert cli(sandbox, "restore", str(tmp_path / "nope.pbb")) == 1
 
 
 def test_forget_removes_one_recording(sandbox):
@@ -462,6 +512,10 @@ def _fetch_models():
 @pytest.mark.parametrize("subdir,name", [
     ("whisper", "large-v3"),
     ("diarization", "pyannote/speaker-diarization-3.1"),
+    # Named speakers put a second model in the diarization directory. If the
+    # fetcher and the runtime ever disagree about the layout, the failure is an
+    # air-gapped machine being told to download something.
+    ("diarization", "pyannote/embedding"),
 ])
 def test_the_fetcher_writes_where_the_runtime_looks(tmp_path, monkeypatch, subdir, name):
     fetch_models = _fetch_models()

@@ -74,6 +74,20 @@ CREATE TABLE IF NOT EXISTS analyses (
     FOREIGN KEY (recording_id) REFERENCES recordings(id) ON DELETE CASCADE
 );
 
+-- Spend that belongs to no recording. `ask` and an LLM-phrased draft both cost
+-- money and neither has a recording to attach it to, so without this they were
+-- invisible to `status` -- which contradicts ADR-014, and quietly, which is the
+-- part that matters: a spend guardrail nobody can see is not a guardrail.
+CREATE TABLE IF NOT EXISTS spend (
+    at        TEXT NOT NULL,
+    source    TEXT NOT NULL,
+    provider  TEXT NOT NULL DEFAULT '',
+    model     TEXT NOT NULL DEFAULT '',
+    cost_usd  REAL NOT NULL DEFAULT 0
+);
+
+CREATE INDEX IF NOT EXISTS idx_spend_at ON spend(at);
+
 CREATE TABLE IF NOT EXISTS artifacts (
     recording_id TEXT NOT NULL,
     kind         TEXT NOT NULL,
@@ -253,6 +267,22 @@ class Database:
                 ),
             )
 
+    def record_spend(self, source: str, cost_usd: float, provider: str = "",
+                     model: str = "") -> None:
+        """
+        Note money spent outside the pipeline.
+
+        A zero is still recorded. A local model costs nothing and a row saying so
+        is how you tell "this ran locally" apart from "this never ran", which is
+        the same reasoning as the unpriced-provider warning in ADR-014.
+        """
+        with self.tx() as cur:
+            cur.execute(
+                "INSERT INTO spend(at,source,provider,model,cost_usd) VALUES (?,?,?,?,?)",
+                (datetime.now(timezone.utc).isoformat(), source, provider, model,
+                 float(cost_usd or 0.0)),
+            )
+
     def audit(self, action: str, detail: str = "", recording_id: str | None = None,
               actor: str = "pipeline") -> None:
         with self.tx() as cur:
@@ -408,10 +438,18 @@ class Database:
             by_profile = {r["profile_id"]: r["c"] for r in cur.fetchall()}
             cur.execute("SELECT stage, COUNT(*) c FROM recordings GROUP BY stage")
             by_stage = {r["stage"]: r["c"] for r in cur.fetchall()}
+            cur.execute("SELECT source, COALESCE(SUM(cost_usd),0) k, COUNT(*) c "
+                        "FROM spend GROUP BY source")
+            other = {r["source"]: {"cost_usd": round(r["k"], 4), "calls": r["c"]}
+                     for r in cur.fetchall()}
+        other_cost = sum(v["cost_usd"] for v in other.values())
         return {
             "recordings": row["c"],
             "audio_hours": round(row["d"] / 3600.0, 2),
-            "total_cost_usd": round(row["k"], 4),
+            "pipeline_cost_usd": round(row["k"], 4),
+            "other_cost_usd": round(other_cost, 4),
+            "total_cost_usd": round(row["k"] + other_cost, 4),
+            "by_source": other,
             "by_profile": by_profile,
             "by_stage": by_stage,
         }

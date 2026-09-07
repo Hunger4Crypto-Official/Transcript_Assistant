@@ -1,6 +1,379 @@
 # Changelog
 
-## Unreleased — day-length recordings
+## Unreleased — a furnished first five minutes, and proofs instead of examples
+
+- **`demo`** — a fresh install no longer opens onto seven empty tabs. The
+  command writes fictional sample recordings into the inbox and (with
+  `--process`) runs them through the ordinary pipeline: no pre-baked database,
+  no path the real code would never take. The set is chosen to show several
+  states at once — a consented client call (encrypted), a coaching session
+  (plaintext at rest, so the player can scrub it), a family conversation
+  (forced local, kept out of shared digests), and a call with no consent
+  exchange, which the gate holds so you watch it work rather than read about
+  it. Every sample announces itself as fiction in its own first line, so the
+  label survives into the transcript, search, and the player; nothing already
+  in the inbox is ever overwritten, and `--clean` removes only files from the
+  catalogue. The app's empty Library offers the same thing as a button.
+- **`app`** — the local app started from the terminal, and `app --probe`: it
+  stands the whole server stack up, checks it really serves a token-guarded
+  page, prints the verdict, and exits. That makes the app itself a headless,
+  scriptable self-test, and it now runs as part of the smoke suite — the one
+  gate that previously covered every route except the app.
+- **Property-based tests** (`hypothesis`) over the parts where "we tried some
+  examples" is too weak a claim. The load-bearing one, stated as an invariant
+  rather than a case: *a vault artifact either returns exactly the bytes that
+  were written, or raises — there is no third outcome.* Generated plaintexts,
+  arbitrary single-byte mutations anywhere in the file, arbitrary truncations,
+  and reads under the wrong recording id all have to end in exact bytes or a
+  `VaultError`. Verified to have teeth by defeating both of the vault's guard
+  layers at once and watching the properties fail. Also covers the upload
+  filename sanitiser (it can never escape the inbox), question detection
+  (total and deterministic over any recogniser output), content types, and
+  Range serving (never a byte outside what was asked for).
+- **Command palette** (Ctrl-K) and a sample-loading empty state in the app.
+- **The audio path has now actually run on audio.** Every previous test fed
+  the pipeline text transcripts, which left the code that decodes, normalises,
+  chunks and probes real media unexercised. Two new suites generate real audio
+  with ffmpeg (no fixture binaries in the repository) and run the real
+  `AudioPreparer` and the real `Pipeline` over it: mono/16-bit/sample-rate
+  conversion verified by decoding the output with Python's own `wave` module,
+  every accepted container decoded rather than merely listed, the
+  duration-budget refusal proven to happen *before* anything is written, and
+  chunk coverage asserted so no second of a recording can end up in no chunk.
+  The end-to-end run stubs only the recogniser — and the stub validates the
+  audio it is handed, so "stubbed" cannot quietly mean "skipped". A real mp3
+  goes in and comes back out of the vault byte-identical and still playable.
+  They skip with a reason when ffmpeg is absent rather than passing hollowly.
+- **Documented a design truth that would have surprised the first real user**:
+  with diarization off (the default — it needs a HuggingFace token), every
+  audio segment is labelled `SPEAKER`, so the consent detector cannot tell who
+  announced the recording or who agreed and honestly refuses to certify
+  consent. A consented client call is therefore held for review. That is
+  correct behaviour, it is now pinned by a test, and it is called out in the
+  README along with its effect on People and Insights.
+
+## Earlier unreleased — the second brain: brief, people, insights, and the player
+
+Four engines that turn an archive of recordings into something no note-taker
+ships, each headless-first (a CLI route wired into the smoke suite) and then
+surfaced in the app:
+
+- **`brief`** — the week synthesised across every recording: what moved, which
+  promises are aging, who is waiting on you, what to do next. Built in two
+  layers with a hard line between them: a deterministic skeleton read entirely
+  off disk (renders completely with no model at all, labelled **assembled**),
+  and a narrative layer whose every quoted receipt is verified verbatim with
+  the extractor's own `quote_is_present` — a fabricated quote or an un-sent
+  recording id is dropped, counted, and reported, never rendered. Locality and
+  redaction verdicts come from `ask`'s own functions, so the brief can never
+  reach a softer privacy conclusion than a question would.
+- **`people`** — one page per person, assembled from everywhere they were
+  heard: minutes, topics, verified quotes, commitments in both directions, and
+  every appearance. Two honesty rules are baked into the data: a speaker label
+  is attribution, not verified identity (`voice_verified` says which, and
+  placeholder labels are bucketed as "(unidentified speakers)" rather than
+  invented into a person), and nothing is shown that was not already verified
+  verbatim upstream. Personal recordings stay off the roster unless asked.
+- **`insights`** — how you actually talk, measured rather than remembered:
+  talk share, pace, question rate, longest monologue, silence share, and
+  overlap-based `interruptions_approx` (named so nobody quotes it without the
+  caveat), per speaker, per recording, and as a 30-day-vs-prior trend. Pure
+  arithmetic over the stored segments — no model, and nothing stored, so
+  `forget` has nothing new to chase.
+- **The moment player** — click a recording in the Library and hear it. The
+  original streams from the vault decrypted chunk by chunk straight into the
+  response; **plaintext never touches disk** — no temp files, no
+  decrypt-then-serve staging. Range requests are honoured exactly on plaintext
+  originals (scrubbing works) and refused on encrypted ones rather than staging
+  a decrypted copy to satisfy the seek — players buffer forward instead. The
+  synced transcript highlights the line under the playhead and clicking a line
+  jumps the audio. A tampered or truncated vault stream still dies loudly
+  mid-body; silent truncation stays impossible.
+
+The app grew **Brief**, **People**, and **Insights** tabs on the same
+token-guarded loopback server, all escaped before touching the DOM, all
+invalidated when a processing run finishes.
+
+## Earlier unreleased — the clickable app, the charts, and the safety net
+
+### A window instead of a terminal
+
+Double-click and use it from a browser: `desktop_app.py` (and the packaged
+Windows build under `packaging/`) opens a local app that is a thin skin over
+the same pipeline; the locality locks, consent gate, and vault keep their
+single implementation. Seven tabs:
+
+- **Process** — passphrase, the Offline/free-cloud-key brain switch, readiness
+  checks, drop recordings, watch the run. A run that holds recordings points
+  you at the Held tab.
+- **Library** — every recording with profile, minutes, and encrypted/held
+  badges, plus digest controls: a time window and an include-personal toggle
+  (with the over-someone's-shoulder warning), opening the charts digest.
+- **Search** — what was actually said, with the honesty line intact: it says
+  how many recordings were searched and how many could not be opened, so a
+  partial search never presents as a complete one.
+- **Ask** — a question answered with citations; with no model reachable it
+  says plainly that it is showing ranked excerpts, never a fabricated answer.
+- **Follow-ups** — the commitments worklist, oldest first, with Done/Drop/
+  Reopen persisting through the engine's own status rules.
+- **Held** — quarantine triage with the reason classed and badged. Releasing
+  is a human affirmation; a recording where someone *objected* has no release
+  button at all and says why — a refusal is not a click. Forget requires
+  typing the word and routes through the real `forget`.
+- **Tools** — one-click encrypted backup, and the app's version.
+
+Everything the page renders is escaped before it touches the DOM — transcript
+text is untrusted content even in your own browser.
+
+**Phone mode** (`--phone`, or `PLAUD_BRIDGE_PHONE=1`): the app also answers on
+your Wi-Fi address, so a phone on the same network opens the same tabs and
+"Add to Home Screen" installs it like an app — no cloud involved. Opt-in every
+launch, never a default. The token stays mandatory on every request, and over
+the network that includes the page itself, so nobody on the Wi-Fi can be handed
+the key by asking; a served manifest makes the install real. Home network only:
+the link carries the session's key and Wi-Fi traffic is unencrypted.
+
+- Loopback-only, token-guarded, Host-checked. Another machine — or a hostile
+  website you happen to have open — cannot drive it.
+- The Offline brain diagnoses itself: it probes the local model server and
+  tells you the one command to run — "install from ollama.com" vs
+  `ollama pull <model>` vs ready. Choosing Offline enables `llm.local` in
+  memory; the file on disk is never rewritten.
+- `.github/workflows/build-windows.yml` builds the double-clickable
+  `PlaudBridge.exe` on a Windows runner; see `packaging/README.md`.
+- The app keeps itself current: it checks GitHub Releases on launch and shows
+  an "Update available" banner; one click downloads the new build, verifies it
+  against the SHA-256 the CI published beside it, and swaps itself out.
+  Deliberately not silent -- an app that replaces its own executable in the
+  background is a supply-chain attack with a release schedule. A release
+  without its checksum is refused. `PLAUD_BRIDGE_NO_UPDATE_CHECK=1` turns the
+  check off; a private repo needs `GITHUB_TOKEN` for the check to see releases.
+
+### The digest grew charts
+
+`digest --format html` now opens with an "In Charts" section: minutes per
+section, minutes per day across the window (weeks when the window is long),
+and API spend per section. Pure inline SVG — no scripts, no network, prints
+cleanly, light and dark. Charts are computed from the same sections the text
+was rendered from, so an excluded personal profile cannot appear in a chart by
+construction.
+
+### One file that brings the archive back
+
+`backup` writes the vault, index, outbox, quarantine, and your tuned config
+into a single file encrypted with the vault's own streaming cipher — safe on
+an external drive or in a cloud folder, and refused outright without a
+passphrase. `restore` decrypts, unpacks, and verifies everything in a staging
+directory first; a wrong passphrase or tampered file changes nothing. The
+index is snapshotted through SQLite's backup API so a live database cannot
+restore as corruption.
+
+### Triage the quarantine at scale
+
+`quarantine` lists everything held, with the reason distilled: explicit
+refusal, no announcement found, or a static consent gate. `--release-all`
+demands its own typed confirmation and never includes a refusal — those stay
+one-at-a-time on purpose. `--forget-all` routes through the real `forget`,
+inheriting its locked-vault refusal and derived-store purging. A run that
+quarantines now points you here.
+
+### Measure before you migrate
+
+`python scripts/bench.py recording.mp3` times ffmpeg and local transcription
+on one real file and projects your backlog: the realtime factor on *this*
+machine is the number that decides local-versus-cloud, and specs do not know
+it.
+
+## Unreleased — names, answers, memory, and follow-through
+
+### Ask the archive a question
+
+`ask "what did I promise the Hendersons?"` answers from what was actually said.
+Retrieval runs first and is deterministic; only the excerpts it found are ever
+shown to a model.
+
+- Every citation is validated against the bundle that was actually sent. One
+  naming a recording that was never sent is dropped and reported by id. See
+  ADR-024, and the mutation test that deletes the check to prove it matters.
+- With no model configured the command still works, returning ranked excerpts
+  and saying plainly that they are search output rather than an answer.
+- Exits 2 when the answer is incomplete; 0 when "nothing matched" is the
+  complete and honest answer.
+- The strictest profile in the bundle decides whether the call may leave the
+  machine. Personal profiles stay out unless asked for.
+
+### It carries what it knows forward
+
+Every recording used to be analysed as though it were the first one ever seen.
+
+- Each profile keeps a ledger of people, open commitments, and recurring topics,
+  and the next analysis for that profile is made knowing them.
+- The ledger is derived and rebuildable — `memory --rebuild` replays the archive
+  — so it can never quietly become a second uncontrolled copy of it. ADR-026.
+- Profile isolation is enforced by the cipher, not by convention: each ledger is
+  encrypted under its own AAD.
+- Entries decay. A commitment closes only when a later recording says it was
+  done, because guessing closure from repetition would be inventing. ADR-027.
+- `forget` now reaches memory, or its promise would be false.
+
+### Follow-ups, drafted and never sent
+
+- Commitments are collected across recordings, deduplicated by content so the
+  same promise in three conversations is one item, and aged so the oldest debt
+  sorts first.
+- `--done` persists, so a closed item stops resurfacing.
+- `--draft` writes into the outbox. There is no send path in the code at all —
+  no SMTP, no mail API, no configuration for one. ADR-025.
+- Drafts are redacted unconditionally, diverging from `export` on purpose: a
+  draft is outbound by definition.
+
+### The inbox takes what note takers actually produce
+
+"Works with your recorder" and "works with everything that records" are
+different products, and the difference was an extension list and a parser.
+
+- WebVTT is now a first-class transcript format — Zoom, Teams, Fireflies,
+  tl;dv, and YouTube all export it. Header, NOTE, STYLE, and cue-identifier
+  handling included, hourless timestamps and comma milliseconds tolerated,
+  markup stripped.
+- **Teams voice tags become named speakers.** `<v Marcus Reed>` is the platform
+  stating who spoke from its own per-participant channels, so it is treated as
+  authoritative and flows into the stored transcript unchanged — named speakers
+  with no diarization, no enrollment, and no model.
+- The audio list grew from five extensions to fifteen: phone memos (`.m4a`
+  `.m4b`), WhatsApp and Telegram voice notes (`.opus` `.oga` `.amr`), and
+  meeting recordings (`.mp4` `.mov` `.webm`, audio extracted). ffmpeg already
+  normalised any container; the extension list was the only gate.
+- Unsupported files are still refused by name, never silently ignored.
+
+### The brain, brought up to date
+
+The analysis model was two generations stale, and upgrading it would have failed
+on the first call.
+
+- `claude-opus-5` replaces `claude-sonnet-4-6`, with the rate table updated to
+  match. The pricing tests now read the rates from config instead of restating
+  them, so they stop failing the day a price moves.
+- **No sampling parameter is sent to Anthropic.** `temperature` was pinned to
+  0.0 for determinism it never provided; the current models reject it outright,
+  so it was a 400 waiting for the next model bump rather than a harmless
+  leftover.
+- **The system prompt is cached.** A profile's instructions and schema are
+  identical across every recording and every episode, and were being paid for at
+  full price every time. ADR-030.
+- `max_tokens` raised, because thinking is on by default on this generation and
+  shares that ceiling with the response — the old budget truncated mid-JSON.
+- `effort` is now a config key, and it is the cost lever that replaced the token
+  budget.
+
+**The free Groq key is untouched** — its LLM and its Whisper ASR both keep
+working exactly as before. The sampling parameter was removed on one vendor's
+models, not on every endpoint that speaks the same wire format, and a test now
+fails if anyone "helpfully" strips Groq's too.
+
+### A quote is findable, or it is dropped
+
+`ask` validated its citations. The extractor, which produces the promises that
+flow into memory and the follow-up worklist, was on the honour system — the
+prompt said "the speaker's exact words" and nothing checked.
+
+Now every `quote` field is checked against the text the model was actually shown
+— redacted, when compliance redacted it, since that is all the model could have
+quoted. Case, punctuation, and whitespace are forgiven; different words are not.
+Dropped quotes are counted on the analysis and named in the log. ADR-029.
+
+### A transcript it was guessing at now says so
+
+Speech recognition does not decline. Given music, a restaurant, or a device in a
+pocket it returns fluent English that nobody said -- and everything here treated
+the transcript as fact, so an invented sentence became a promise the worklist
+put in front of you.
+
+Every segment has carried a confidence score since the first version and nothing
+read it. Now the pipeline does, along with the recogniser's own estimate that a
+span held no speech at all, which is the signature that catches the confident
+inventions the log probability alone misses.
+
+- A bad transcript is marked, audited, and announced in the digest **above** the
+  analysis, because everything below that line came out of it.
+- The extraction prompt is told to prefer empty fields, last, beside the
+  instruction -- a caveat given as background gets noted and ignored.
+- Weighted by duration, so four minutes of invented music cannot hide behind a
+  crowd of real two-second replies.
+- Imported text reports *unknown*, not clean. It has no scores, and calling it
+  clean would claim a check that never ran.
+- Nothing is deleted or refused. A quiet conversation in a car scores badly and
+  is still the conversation you wanted. See ADR-028.
+
+The thresholds are guesses. Check them against your own microphone.
+
+### Two things the new features quietly broke, found afterwards
+
+- `verify` reported voiceprints, saved answers, and drafts as "files on disk
+  that the index does not know about", next to advice about rebuilt databases
+  that could not apply to them. Three features had started writing into the
+  vault and the outbox on purpose. They are now counted and named as
+  non-artifacts, and a real orphan still stands out beside them -- the fix is
+  not "stop looking in the vault".
+- `ask` and LLM-phrased drafts spent money that `status` could not see, which
+  contradicts ADR-014. Spend that belongs to no recording now has a table of its
+  own, and `status` breaks the total down by where it went.
+
+### A smoke suite that drives the real command line
+
+`scripts/smoke.py` stands up a throwaway project, serves its own model on
+loopback, and runs every route as real subprocesses — no ffmpeg, no weights, no
+keys, and it verifies your own `data/` is byte for byte unchanged afterwards.
+
+The route list is read from the parser at runtime, so a new subcommand with no
+coverage fails the run instead of quietly shrinking what "every route" means.
+
+**Two defects it found, both fixed:**
+
+- A quarantined recording made `search --content`, `export`, and `ask` exit 2
+  forever, advising a passphrase fix that could not help. The gate stops those
+  recordings before anything is written, and the archive was reporting "could
+  not open" for content that had deliberately never been stored.
+- `run --force` on a still-quarantined file minted a new recording id, wrote a
+  second quarantine folder, then failed to index it on the UNIQUE content hash
+  and blamed a concurrent process. The surviving folder belonged to a recording
+  no index knew about.
+
+## Previously — named speakers
+
+### Speakers have names now, or they stay numbered
+
+Diarization could tell three people apart but had never heard any of them
+before, so the best it could write was `Speaker 2`.
+
+- `speakers enroll "Marcus" --audio clip.wav` learns a voice. `--start/--end`
+  trim to a clean stretch; a second clip from a different room improves it.
+- `speakers identify <audio>` prints every cluster, its length, and its
+  similarity to everyone enrolled, and writes nothing. It is how you pick a
+  threshold for your own microphone instead of trusting a default.
+- `speakers list` and `speakers forget` complete the set. `doctor` reports the
+  embedding model and who is enrolled.
+- Enrolling yourself beats `assume_owner_is_dominant_speaker`, which is a guess
+  that is usually right and occasionally embarrassing.
+
+### It would rather say nothing than guess
+
+A name is believed in a way `Speaker 2` is not, so two guards stand between a
+similarity score and a transcript: an absolute threshold, and a margin over the
+runner-up. Two brothers at 0.61 and 0.60 is a tie, not an identification, and
+both stay numbered. A person is used at most once per recording. See ADR-022.
+
+### Voiceprints are encrypted or they are not stored
+
+Enrollment requires a working vault passphrase, with no plaintext fallback and
+no flag to ask for one. A voiceprint is biometric data about people who did not
+install this software; a plaintext copy of it is a biometric database in a user
+directory. See ADR-023.
+
+Nothing is uploaded — the embedding model runs locally like everything else.
+`scripts/fetch_models.py --embedding` collects it for an air-gapped machine.
+
+## Previously — day-length recordings
 
 ### Episodes: a day becomes a rundown per profile
 
@@ -49,7 +422,7 @@ longest recording you own was the one that ran the machine out of memory.
 
 ---
 
-## Unreleased — full audit
+## Previously — full audit
 
 A deliberate audit of the code against its own claims. Everything below shipped,
 and none of it raised an exception — which is what made it worth finding.
@@ -115,7 +488,7 @@ and none of it raised an exception — which is what made it worth finding.
 
 ---
 
-## Unreleased — getting things back out
+## Previously — getting things back out
 
 The pipeline could put recordings in. Little could get them out again.
 
@@ -171,7 +544,7 @@ The pipeline could put recordings in. Little could get them out again.
 
 ---
 
-## Unreleased — voice, templates, and the review cadence
+## Previously — voice, templates, and the review cadence
 
 ### Voice
 
@@ -235,7 +608,7 @@ quarterly, and annually. Nothing implemented it.
 
 ---
 
-## Unreleased — unpacking and enforcement
+## Previously — unpacking and enforcement
 
 The repository previously held the project as a `.tar.gz` with a few files
 unpacked beside it. This release makes it a working repository, then fixes what

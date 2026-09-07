@@ -8,6 +8,7 @@ multipart POST, exponential backoff with jitter, and honest error messages.
 
 from __future__ import annotations
 
+import http.client
 import json
 import mimetypes
 import random
@@ -59,6 +60,13 @@ def _request(req: urllib.request.Request, timeout: int) -> tuple[int, bytes]:
         raise HttpError(f"network error contacting {req.full_url}: {exc.reason}") from exc
     except TimeoutError as exc:
         raise HttpError(f"timeout contacting {req.full_url}") from exc
+    except (OSError, http.client.HTTPException) as exc:
+        # urllib wraps a failure during the send in URLError but lets a failure
+        # while reading the reply -- a server that accepted the upload and hung
+        # up, a reset mid-response -- propagate raw. Those are exactly the
+        # transient failures the retry loop exists for, and a raw exception here
+        # skipped both the retry and the caller's provider failover.
+        raise HttpError(f"network error contacting {req.full_url}: {exc}") from exc
 
 
 def post_json(url: str, payload: dict[str, Any], headers: dict[str, str],
