@@ -1764,10 +1764,21 @@ def cmd_review(args) -> int:
         fallback = cfg.get("routing.fallback_profile", "unfiled")
         print(f"\nUnfiled recordings (last {args.days} days)")
         suggestions: dict[str, int] = {}
+        unopened = 0
         unfiled_rows = db.query(profile_id=fallback, since_days=args.days, limit=200)
+        archive = Archive(cfg, db)
         for row in unfiled_rows:
-            payload = json.loads(row["payload_json"])
-            for analysis in payload.get("analyses", []):
+            # The fallback profile encrypts at rest, so the index withholds its
+            # fields and the suggestions live in the vault. Reading the index
+            # row alone here answered "no keyword suggestions" for every
+            # encrypted recording -- a false answer about the one thing this
+            # section is for -- so open the record properly, and count what
+            # would not open rather than reading it as empty.
+            record = archive.full_record(row)
+            if record is None:
+                unopened += 1
+                continue
+            for analysis in record.get("analyses", []):
                 if analysis.get("profile_id") != fallback:
                     continue
                 for word in analysis.get("fields", {}).get("suggested_keywords") or []:
@@ -1775,12 +1786,15 @@ def cmd_review(args) -> int:
                     if key:
                         suggestions[key] = suggestions.get(key, 0) + 1
         print(f"  {len(unfiled_rows)} recording(s) the router could not place")
+        if unopened:
+            print(f"  {unopened} of them could not be opened, so their suggestions are not "
+                  "counted. Set PLAUD_BRIDGE_PASSPHRASE if they are encrypted.")
         if suggestions:
             top = sorted(suggestions.items(), key=lambda kv: -kv[1])[:15]
             print("  keywords worth adding to a profile:")
             print("    " + ", ".join(f"{w} ({n})" for w, n in top))
             due.append("add the keywords above to the right profile's routing.keywords")
-        elif unfiled_rows:
+        elif unfiled_rows and not unopened:
             print("  no keyword suggestions; read them with `run.py search`")
 
         # --- quarterly: retention ----------------------------------------
