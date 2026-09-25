@@ -83,6 +83,7 @@ READ_ONLY = [
     ("insights", "--days", "90"),
     ("insights", "--profile", "insurance_agent"),
     ("insights", "--include-personal"),
+    ("insights", "--format", "html"),
     ("followups",),
     ("followups", "--status", "all"),
     ("followups", "--format", "html"),

@@ -40,6 +40,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
+from . import viz
 from .digest import to_html
 from .episodes import _STOP
 from .followups import FollowUp, FollowUpError, sort_key
@@ -441,7 +442,9 @@ def render_roster(people: list[Person], *, fmt: str = "markdown",
         raise PeopleError(f"unknown format '{fmt}'. Use markdown or html.")
     heading = title or "People"
     body = _roster_markdown(people, heading)
-    return to_html(body, title=heading) if fmt == "html" else body
+    if fmt != "html":
+        return body
+    return viz.inject(to_html(body, title=heading), _roster_charts(people))
 
 
 def render_person(person: Person, *, fmt: str = "markdown") -> str:
@@ -449,7 +452,96 @@ def render_person(person: Person, *, fmt: str = "markdown") -> str:
     if fmt not in ("markdown", "html"):
         raise PeopleError(f"unknown format '{fmt}'. Use markdown or html.")
     body = _person_markdown(person)
-    return to_html(body, title=person.display_name) if fmt == "html" else body
+    if fmt != "html":
+        return body
+    return viz.inject(to_html(body, title=person.display_name), _person_charts(person),
+                      before="<h2>Every time they were heard</h2>")
+
+
+# One color per role, never per person: a hue per name would need a legend as
+# long as the roster, and hue must never be the only thing telling two people
+# apart. Every bar carries its name as text.
+_OWNER, _CONTACT, _BUCKET = viz.slot(0), viz.slot(1), viz.NEUTRAL
+_ROSTER_CHART_LIMIT = 15
+
+
+def _role(person: Person) -> str:
+    if person.is_bucket:
+        return _BUCKET
+    return _OWNER if person.is_owner else _CONTACT
+
+
+def _days_ago(day: str, today) -> int | None:
+    try:
+        return (today - datetime.strptime(day[:10], "%Y-%m-%d").date()).days
+    except ValueError:
+        return None
+
+
+def _ago(days: int) -> str:
+    if days <= 0:
+        return "today"
+    return "yesterday" if days == 1 else f"{days} days ago"
+
+
+def _roster_charts(people: list[Person], today=None) -> str:
+    """
+    Two charts over the roster table's own columns: minutes heard, and how
+    long since each person was last heard -- the second is the one that
+    tells you who has gone quiet.
+    """
+    if not people:
+        return ""
+    today = today or datetime.now(timezone.utc).date()
+    shown = people[:_ROSTER_CHART_LIMIT]
+
+    rows = [
+        (p.display_name + (" (you)" if p.is_owner else ""), p.minutes_heard,
+         f"{viz.fmt_minutes(p.minutes_heard)} min · {p.conversations} conv", _role(p))
+        for p in shown
+    ]
+    title = "Bar chart. Minutes heard, per person: " + "; ".join(
+        f"{label}, {printed}" for label, _, printed, _ in rows
+    )
+    parts = [viz.labelled_bars(rows, "Minutes heard, per person", title)]
+
+    quiet = []
+    for p in people:
+        if p.is_bucket or p.is_owner or not p.last_heard:
+            continue
+        days = _days_ago(p.last_heard, today)
+        if days is not None:
+            quiet.append((p.display_name, float(max(days, 0)), _ago(days), _CONTACT))
+    quiet.sort(key=lambda r: (-r[1], r[0].lower()))
+    if quiet:
+        quiet = quiet[:_ROSTER_CHART_LIMIT]
+        title = "Bar chart. Days since each person was last heard: " + "; ".join(
+            f"{label}, {printed}" for label, _, printed, _ in quiet
+        )
+        parts.append(viz.labelled_bars(quiet, "How long since you last heard them", title))
+
+    roles = {_role(p) for p in shown}
+    keys = [(label, cls) for label, cls in (
+        ("You", _OWNER), ("People you talk with", _CONTACT), ("Unidentified speakers", _BUCKET),
+    ) if cls in roles]
+    return viz.block("In Charts", parts, keys)
+
+
+def _person_charts(person: Person) -> str:
+    """How much of each conversation was this person, in the order they happened."""
+    dated = sorted((a for a in person.appearances if a.when), key=lambda a: a.when)
+    if not dated:
+        return ""
+    cls = _role(person)
+    buckets = [[(a.minutes, cls)] for a in dated]
+    ticks = viz.unique_ticks([a.when[5:10] for a in dated])
+    title = f"Column chart. Minutes of {person.display_name}, per conversation: " + "; ".join(
+        f"{a.when}, {viz.fmt_minutes(a.minutes)} min" for a in dated
+    )
+    return viz.block("In Charts", [
+        viz.columns(buckets, ticks, f"Minutes of {person.display_name}, conversation by "
+                    "conversation", title),
+    ])
 
 
 def _roster_markdown(people: list[Person], heading: str) -> str:
@@ -482,7 +574,7 @@ def _roster_markdown(people: list[Person], heading: str) -> str:
         out.append(
             f"| {_cell(person.display_name)} | {person.identity} "
             f"| {person.conversations} | {person.last_heard or '-'} "
-            f"| {person.minutes_heard:.0f} | {person.open_items} |"
+            f"| {viz.fmt_minutes(person.minutes_heard)} | {person.open_items} |"
         )
     out += [
         "",
@@ -504,7 +596,7 @@ def _person_markdown(person: Person) -> str:
 
     meta = [person.identity]
     meta.append(f"{person.conversations} conversation(s)")
-    meta.append(f"{person.minutes_heard:.0f} min heard")
+    meta.append(f"{viz.fmt_minutes(person.minutes_heard)} min heard")
     if person.first_heard:
         meta.append(f"first heard {person.first_heard}")
     if person.last_heard and person.last_heard != person.first_heard:
@@ -558,7 +650,7 @@ def _person_markdown(person: Person) -> str:
     for appearance in person.appearances:
         out.append(
             f"- **{appearance.when or 'undated'}** — {_cell(appearance.source_name)} "
-            f"(`{appearance.recording_id}`), {appearance.minutes:.1f} min"
+            f"(`{appearance.recording_id}`), {viz.fmt_minutes(appearance.minutes)} min"
             + (f", {appearance.profile_id}" if appearance.profile_id else "")
         )
         out += [f"    - \"{_cell(text)}\"" for text in appearance.said]

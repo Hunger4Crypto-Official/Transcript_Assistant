@@ -142,7 +142,7 @@ def test_no_model_renders_the_labelled_template_not_an_error(bench, monkeypatch)
     out = render(brief)
 
     assert "Assembled, not narrated" in out
-    for heading in ("The week", "Aging", "People waiting on you", "Next"):
+    for heading in ("The week", "Aging", "Who is waiting on whom", "Next"):
         assert heading in out
     # The template really carries the skeleton: the oldest promise appears.
     assert "Thursday" in out

@@ -41,16 +41,19 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
+from . import viz
+
 # Locality and redaction policy are decided by ask's own functions rather than
 # a re-implementation, so the brief cannot quietly come to a different verdict
 # than a question about the same recordings would.
 from .ask import _locality, _redaction_required
 from .compliance.redact import redact_text
 from .digest import DigestBuilder, DigestOptions, fmt_value, to_html
-from .followups import FollowUpError, collect
+from .followups import FollowUpError, aging_chart, collect
 from .llm import complete_json
 from .llm.base import LLMError
 from .logging_setup import get
+from .people import PeopleError, collect_people
 from .profiles.extractor import _flatten, quote_is_present
 
 log = get("brief")
@@ -65,7 +68,7 @@ class BriefError(RuntimeError):
 _SECTIONS = (
     ("the_week", "The week"),
     ("aging", "Aging"),
-    ("people", "People waiting on you"),
+    ("people", "Who is waiting on whom"),
     ("next", "Next"),
 )
 
@@ -89,6 +92,11 @@ class Brief:
     followups: list[dict[str, Any]] = field(default_factory=list)
     attention: list[dict[str, Any]] = field(default_factory=list)
     next_actions: list[dict[str, Any]] = field(default_factory=list)
+    # Who owes whom, filed by the People engine -- attribution first, presence
+    # second -- so the brief and a person's own page can never disagree about
+    # which way a promise runs. Each entry: {who, text, age_days, id}.
+    waiting_on_you: list[dict[str, Any]] = field(default_factory=list)
+    you_are_waiting_on: list[dict[str, Any]] = field(default_factory=list)
     quarantined: int = 0
     spend: dict[str, Any] = field(default_factory=dict)
     recording_ids: list[str] = field(default_factory=list)
@@ -129,6 +137,8 @@ class Brief:
             "followups": list(self.followups),
             "attention": list(self.attention),
             "next_actions": list(self.next_actions),
+            "waiting_on_you": list(self.waiting_on_you),
+            "you_are_waiting_on": list(self.you_are_waiting_on),
             "quarantined": self.quarantined,
             "spend": dict(self.spend),
             "recording_ids": list(self.recording_ids),
@@ -207,6 +217,8 @@ def _gather(cfg, db, archive, brief: Brief, vault, notes: list[str]) -> list:
         # A locked state file must not take the whole memo down; the brief says
         # what it could not read instead of pretending nothing is open.
         notes.append(f"Open follow-ups could not be read: {exc}")
+    if brief.followups:
+        _attribute(cfg, db, archive, brief, vault, notes)
 
     brief.quarantined = len(db.query(stage="quarantined", limit=10_000))
     brief.spend = db.stats()
@@ -216,6 +228,51 @@ def _gather(cfg, db, archive, brief: Brief, vault, notes: list[str]) -> list:
 # =========================================================================
 # The material the model is allowed to see
 # =========================================================================
+def _attribute(cfg, db, archive, brief: Brief, vault, notes: list[str]) -> None:
+    """
+    File each open follow-up by direction: who is waiting on the owner, and
+    whom the owner is waiting on.
+
+    A follow-up's `counterparty` is whoever SAID it, not whoever is owed it,
+    so listing counterparties as "people waiting on you" ran backwards both
+    ways: the owner's own promise named the owner, and a client's promise
+    named the client as waiting when the owner was the one waiting. The
+    People engine already files these correctly for a person's page; asking
+    it here means there is one definition of direction, not two.
+
+    An owner's promise made in a conversation with two other people is filed
+    under both -- presence is the evidence, and both were in the room.
+    """
+    try:
+        people = collect_people(cfg, db, archive, include_personal=brief.include_personal,
+                                vault=vault)
+    except PeopleError as exc:
+        notes.append(f"Who is waiting on whom could not be worked out: {exc}")
+        return
+    open_ids = {str(i["id"]) for i in brief.followups}
+    for person in people:
+        if person.is_bucket or person.is_owner:
+            continue
+        for item, bucket in (
+            *((i, brief.waiting_on_you) for i in person.commitments_to_them),
+            *((i, brief.you_are_waiting_on) for i in person.commitments_from_them),
+        ):
+            if item.id in open_ids:
+                bucket.append({"who": person.display_name, "text": item.text,
+                               "age_days": item.age_days, "id": item.id})
+    for bucket in (brief.waiting_on_you, brief.you_are_waiting_on):
+        bucket.sort(key=lambda e: (-int(e["age_days"]), e["who"].lower()))
+
+
+def _direction(cfg, counterparty: str) -> str:
+    """How a follow-up line tells a model which way the promise runs."""
+    owner = str(cfg.get("diarization.owner_label", "") or "").strip().lower()
+    who = (counterparty or "").strip()
+    if not who or who.lower() == owner:
+        return " (the owner promised this)"
+    return f" ({who} promised this to the owner)"
+
+
 def _blocks(cfg, sections, followups: list[dict[str, Any]]) -> list[tuple[str, str]]:
     """(recording_id, text) pairs, in the order they are offered to the model."""
     out: list[tuple[str, str]] = []
@@ -244,8 +301,7 @@ def _blocks(cfg, sections, followups: list[dict[str, Any]]) -> list[tuple[str, s
         out.append(("", "OPEN FOLLOW-UPS (oldest first):"))
         for item in followups:
             line = f"  - ({item['age_days']}d) {item['text']}"
-            if item.get("counterparty"):
-                line += f" (said by {item['counterparty']})"
+            line += _direction(cfg, str(item.get("counterparty") or ""))
             if item.get("due"):
                 line += f" (due {item['due']})"
             line += f" [{item['profile_id']}, from {item['recording_id']}]"
@@ -329,7 +385,8 @@ _SHAPE = """\
   "aging": string
       // which follow-ups have waited longest, and for how long
   "people": string
-      // who is waiting on the owner, and for what
+      // who is waiting on the owner, and whom the owner is waiting on --
+      // the follow-up lines already say which direction each one runs
   "next": string
       // the few actions the notes themselves call next
   "receipts": list[object]
@@ -407,11 +464,11 @@ def _template_sections(brief: Brief) -> dict[str, str]:
     """
     if brief.profiles:
         per = "; ".join(
-            f"{p['heading']}: {p['recordings']} recording(s), {p['minutes']:.0f}m"
+            f"{p['heading']}: {p['recordings']} recording(s), {viz.fmt_minutes(p['minutes'])}m"
             for p in brief.profiles
         )
         week = (
-            f"{brief.recordings} recording(s), {brief.minutes:.0f} minute(s) in "
+            f"{brief.recordings} recording(s), {viz.fmt_minutes(brief.minutes)} minute(s) in "
             f"the last {brief.days} day(s). {per}."
         )
     else:
@@ -429,13 +486,17 @@ def _template_sections(brief: Brief) -> dict[str, str]:
     else:
         aging = "Nothing is outstanding."
 
-    waiting = [i for i in brief.followups if i.get("counterparty")]
-    if waiting:
-        people = "; ".join(
-            f"{i['counterparty']} — {i['text']} ({i['age_days']}d)" for i in waiting[:5]
-        ) + "."
-    else:
-        people = "No open follow-up names a person waiting on you."
+    def names(entries: list[dict[str, Any]]) -> str:
+        return "; ".join(f"{e['who']} — {e['text']} ({e['age_days']}d)" for e in entries[:5])
+
+    halves = []
+    if brief.waiting_on_you:
+        halves.append(f"Waiting on you: {names(brief.waiting_on_you)}.")
+    if brief.you_are_waiting_on:
+        halves.append(f"You are waiting on: {names(brief.you_are_waiting_on)}.")
+    people = " ".join(halves) or (
+        "No open follow-up names anyone waiting on you, or anyone you are waiting on."
+    )
 
     lines = [f"{a['action']} ({a['source_name']})" for a in brief.next_actions[:5]]
     if brief.attention:
@@ -617,7 +678,40 @@ def render(brief: Brief, *, fmt: str = "markdown", title: str | None = None) -> 
         raise BriefError(f"unknown format '{fmt}'. Use markdown or html.")
     heading = title or "Brief"
     body = _render_markdown(brief, heading)
-    return to_html(body, title=heading) if fmt == "html" else body
+    if fmt != "html":
+        return body
+    return viz.inject(to_html(body, title=heading), _charts(brief))
+
+
+def _charts(brief: Brief) -> str:
+    """
+    The memo's chart block: where the week's minutes went, and how old the
+    open promises are. Both redraw numbers the memo prints -- the numbers
+    table and the aging section -- and each profile wears one color across
+    both charts.
+    """
+    order = [str(p["profile_id"]) for p in brief.profiles]
+    order += [pid for pid in dict.fromkeys(str(i["profile_id"]) for i in brief.followups)
+              if pid not in order]
+    colors = {pid: viz.slot(k) for k, pid in enumerate(order)}
+    names = {str(p["profile_id"]): str(p["heading"]) for p in brief.profiles}
+
+    parts = []
+    if brief.profiles:
+        rows = [
+            (str(p["heading"]), float(p["minutes"]),
+             f"{viz.fmt_minutes(p['minutes'])} min · {p['recordings']} rec",
+             colors[str(p["profile_id"])])
+            for p in brief.profiles
+        ]
+        title = "Bar chart. Minutes per profile this window: " + "; ".join(
+            f"{label}, {printed}" for label, _, printed, _ in rows
+        )
+        parts.append(viz.labelled_bars(rows, "Where the minutes went", title))
+    parts.append(aging_chart(
+        [(int(i["age_days"]), str(i["profile_id"])) for i in brief.followups], colors
+    ))
+    return viz.block("In Charts", parts, [(names.get(pid, pid), colors[pid]) for pid in order])
 
 
 def _render_markdown(brief: Brief, heading: str) -> str:
@@ -667,7 +761,7 @@ def _render_markdown(brief: Brief, heading: str) -> str:
         for entry in brief.profiles:
             out.append(
                 f"| {_cell(entry['heading'])} | {entry['recordings']} "
-                f"| {entry['minutes']:.0f} |"
+                f"| {viz.fmt_minutes(entry['minutes'])} |"
             )
         out.append("")
     else:

@@ -468,11 +468,22 @@ def cmd_insights(args) -> int:
     """
     cfg = _load(args)
     db = Database(cfg.path("database"))
+
+    def emit(body: str) -> None:
+        if args.out:
+            dest = Path(args.out)
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_text(body, encoding="utf-8")
+            print(f"wrote {dest}")
+        else:
+            print(body)
+
     try:
         archive = Archive(cfg, db)
         try:
             if args.recording:
-                print(render_recording(recording_metrics(cfg, db, archive, args.recording)))
+                emit(render_recording(recording_metrics(cfg, db, archive, args.recording),
+                                      fmt=args.format))
                 return 0
             report = insights_trend(
                 cfg, db, archive,
@@ -482,7 +493,7 @@ def cmd_insights(args) -> int:
         except InsightsError as exc:
             print(f"\n{exc}\n", file=sys.stderr)
             return 2 if exc.unopened else 1
-        print(render_trend(report))
+        emit(render_trend(report, fmt=args.format))
         return 2 if report.unopened else 0
     finally:
         db.close()
@@ -2068,6 +2079,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--include-personal", action="store_true",
                    help="count father/husband recordings too; they are left out "
                         "by default, the same rule as the digest")
+    p.add_argument("--format", default="markdown", choices=["markdown", "html"],
+                   help="html is self-contained, with charts, and prints cleanly")
+    p.add_argument("--out", default=None, help="write to a file instead of stdout")
     p.set_defaults(func=cmd_insights)
 
     p = sub.add_parser("status", help="index summary")

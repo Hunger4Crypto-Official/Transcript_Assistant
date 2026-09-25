@@ -1,6 +1,47 @@
 # Changelog
 
-## Unreleased — tested to 99%, measured rather than claimed
+## Unreleased — charts on every page, and two bugs found by looking
+
+The digest had the only charts in the product. Now every page that summarises
+draws, from one shared module (`viz.py`) with one set of rules:
+
+- **Insights** (new `--format html`, and "Open with charts" in the app) — your
+  share of each conversation, your pace and question rate conversation by
+  conversation, this month against the month before, and your share by
+  profile. One conversation (`--recording`) shows who held the floor.
+- **People** — minutes heard per person, and how long since you last heard
+  each one, longest silence first. Each person's page charts every
+  conversation they were in.
+- **Brief** — where the week's minutes went, and how old the open promises
+  are, stacked by profile.
+- **Follow-ups** — open items by age (0–2, 3–7, 8–14, 15–30, 31+ days) and by
+  profile.
+
+The rules every chart keeps, pinned in `tests/test_visuals.py`: a chart
+redraws numbers its page already prints — Insights gained a per-conversation
+table so its charts have one — as inert SVG with no script and nothing
+fetched, a `<title>` on every chart for screen readers, and hue never the only
+signal: one color per role or profile, held across every chart on a page, and
+named once in a legend.
+
+**Found by rendering every page and looking at it:**
+
+- **Bars labelled "0" that visibly stood tall.** Any day, person, or profile
+  under a minute rounded down to zero — the digest's per-day chart, the People
+  table (two conversations, "0 minutes"), the brief's numbers. One formatter
+  now labels everything: a decimal under ten minutes, `<0.1` for a sliver,
+  and `0` only for a true zero. Where every column is a real observation (a
+  conversation with no questions), a measured zero is printed rather than
+  left blank; two conversations on one day read `09-23` and `09-23 (2)`.
+- **The brief's "People waiting on you" ran backwards.** It listed whoever
+  *said* each promise: your own promise to a client showed *you* waiting on
+  yourself, and the client's promise to you showed *them* waiting on you. The
+  brief now asks the People engine, which already files direction correctly,
+  and prints both halves — "Waiting on you" and "You are waiting on" — under
+  the heading "Who is waiting on whom". The material a model narrates from
+  states each promise's direction instead of the ambiguous "said by".
+
+## Earlier unreleased — tested to 99%, measured rather than claimed
 
 The suite went from "all tests pass" to a measured number, and then the
 number went up. Coverage is line **and** branch, enforced in CI by a floor

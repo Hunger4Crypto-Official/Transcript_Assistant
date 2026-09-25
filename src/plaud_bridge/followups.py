@@ -48,6 +48,7 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from . import viz
 from .compliance.redact import redact_text
 from .digest import fmt_value, to_html
 from .llm import complete_json
@@ -656,7 +657,73 @@ def render(items: list[FollowUp], *, fmt: str = "markdown", title: str | None = 
 
     heading = title or "Follow-ups"
     body = _render_markdown(items, heading)
-    return to_html(body, title=heading) if fmt == "html" else body
+    if fmt != "html":
+        return body
+    return viz.inject(to_html(body, title=heading), _charts(items))
+
+
+# Age buckets for the aging chart, (lowest day, highest day or None, label).
+# Shaped around how a promise actually goes stale: fresh, this week, slipping,
+# this month, and "somebody has stopped expecting it".
+AGE_BUCKETS: tuple[tuple[int, int | None, str], ...] = (
+    (0, 2, "0–2 days"),
+    (3, 7, "3–7 days"),
+    (8, 14, "8–14 days"),
+    (15, 30, "15–30 days"),
+    (31, None, "31+ days"),
+)
+
+
+def aging_chart(entries: list[tuple[int, str]], colors: dict[str, str],
+                caption: str = "Open follow-ups by age") -> str:
+    """
+    Open follow-ups per age bucket, stacked by profile.
+
+    `entries` are (age_days, profile id) for OPEN items only; `colors` maps a
+    profile id to its color class, supplied by the caller so the same profile
+    wears the same color as everywhere else on its page. Shared by the
+    worklist and the brief, which chart the same promises.
+    """
+    if not entries:
+        return ""
+    order = list(dict.fromkeys(pid for _, pid in entries))
+    buckets = []
+    for lo, hi, _ in AGE_BUCKETS:
+        buckets.append([
+            (float(sum(1 for age, p in entries
+                       if p == pid and age >= lo and (hi is None or age <= hi))),
+             colors.get(pid, viz.NEUTRAL))
+            for pid in order
+        ])
+    ticks = [label for _, _, label in AGE_BUCKETS]
+    title = "Column chart. Open follow-ups by age: " + "; ".join(
+        f"{label}, {sum(v for v, _ in bucket):.0f}"
+        for label, bucket in zip(ticks, buckets, strict=True)
+    )
+    return viz.columns(buckets, ticks, caption, title,
+                       cap=lambda v: f"{v:.0f}", axis=lambda v: f"{v:.0f}", integer=True)
+
+
+def _charts(items: list[FollowUp]) -> str:
+    """The worklist's chart block: how old the open promises are, and where."""
+    open_items = sorted((i for i in items if i.is_open), key=sort_key)
+    if not open_items:
+        return ""
+    order = list(dict.fromkeys(i.profile_id for i in open_items))
+    colors = {pid: viz.slot(k) for k, pid in enumerate(order)}
+    per = {pid: sum(1 for i in open_items if i.profile_id == pid) for pid in order}
+    rows = [(pid, float(count), f"{count} open", colors[pid]) for pid, count in per.items()]
+    per_title = "Bar chart. Open follow-ups per profile: " + "; ".join(
+        f"{pid}, {count}" for pid, count in per.items()
+    )
+    return viz.block(
+        "In Charts",
+        [
+            aging_chart([(i.age_days, i.profile_id) for i in open_items], colors),
+            viz.labelled_bars(rows, "Open follow-ups per profile", per_title),
+        ],
+        [(pid, colors[pid]) for pid in order],
+    )
 
 
 def _render_markdown(items: list[FollowUp], heading: str) -> str:

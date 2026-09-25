@@ -335,7 +335,7 @@ def test_a_section_with_no_text_is_not_rendered_as_an_empty_heading():
     brief = Brief(sections={"the_week": "Quiet.", "aging": "", "next": "Nothing."})
     out = render(brief)
     assert "## The week" in out and "## Next" in out
-    assert "## Aging" not in out and "## People waiting on you" not in out
+    assert "## Aging" not in out and "## Who is waiting on whom" not in out
     assert "No recordings in this window." in out
 
 
