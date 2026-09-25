@@ -72,8 +72,8 @@ deliberately, confirm the test fails, restore. Restore with a `cp` backup —
 
 - **Ruff clean. Every smoke route passes.** Test count and coverage move; the
   numbers below are the last measurement, and `make coverage` re-measures.
-- **Coverage is 99.32% line+branch** — measured 2026-09-07 over 1,477 tests
-  with the exact CI command: 11 of 9,345 statements and 73 of 3,048 branches
+- **Coverage is 99.34% line+branch** — measured 2026-09-25 over 1,522 tests
+  with the exact CI command: 11 of 9,680 statements and 74 of 3,164 branches
   never run. CI enforces a floor of 99 (`COVERAGE_FLOOR` in the Makefile)
   that only moves up. Raise it when the measurement rises; never lower it.
   - **`compliance/gate.py` is at 100% line and branch**, mutation-verified
@@ -91,6 +91,14 @@ deliberately, confirm the test fails, restore. Restore with a `cp` backup —
     servers and injected fake modules; the suite never touches a real
     network. Only real model weights through Whisper and the Windows
     updater's apply step are unreachable here.
+  - **Charts live in `viz.py`**, shared by the digest, brief, people, follow-
+    ups, and insights. Every chart must redraw numbers its page prints, stay
+    inert SVG (no script, nothing fetched, a `<title>`), label every value
+    with `viz.fmt_minutes`/`fmt_share` (a visible mark is never labelled
+    "0"), and keep one color per role or profile across a page. Pinned in
+    `tests/test_visuals.py`. When changing a chart, render the page and look
+    at it (Playwright is at /opt/node22/lib/node_modules/playwright) —
+    two real bugs were found that way that every test had passed.
   - Writing the tests found three real bugs (see CHANGELOG): `review`
     misreporting encrypted unfiled recordings, a mid-reply connection drop
     escaping retry and failover, and a bare speaker label becoming speech.
