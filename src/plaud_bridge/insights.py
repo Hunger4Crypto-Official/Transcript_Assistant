@@ -39,6 +39,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+from . import viz
 from .logging_setup import get
 from .models import Segment, format_stamp
 
@@ -576,9 +577,38 @@ def _pct(value: float) -> str:
     return f"{value:.0%}"
 
 
-def render_recording(m: RecordingMetrics, *, title: str | None = None) -> str:
+def render_recording(m: RecordingMetrics, *, title: str | None = None,
+                     fmt: str = "markdown") -> str:
     """One call's breakdown per speaker, in the digest's markdown shape."""
+    if fmt not in ("markdown", "html"):
+        raise InsightsError(f"unknown format '{fmt}'. Use markdown or html.")
     heading = title or f"Insights — {m.source_name or m.recording_id or 'recording'}"
+    body = _recording_markdown(m, heading)
+    if fmt != "html":
+        return body
+    from .digest import to_html
+
+    return viz.inject(to_html(body, title=heading), recording_charts(m))
+
+
+def recording_charts(m: RecordingMetrics) -> str:
+    """Who held the floor in one conversation: talk share per speaker."""
+    if not m.speakers:
+        return ""
+    rows = [
+        (f"{s.speaker} (you)" if s.is_owner else s.speaker, s.share,
+         f"{viz.fmt_share(s.share)} · {viz.fmt_minutes(s.minutes)} min",
+         viz.slot(0) if s.is_owner else viz.NEUTRAL)
+        for s in m.speakers
+    ]
+    title = "Bar chart. Talk share per speaker: " + "; ".join(
+        f"{label}, {printed}" for label, _, printed, _ in rows
+    )
+    keys = [("You", viz.slot(0)), ("Everyone else", viz.NEUTRAL)] if m.owner_metrics else None
+    return viz.block("In Charts", [viz.labelled_bars(rows, "Who held the floor", title)], keys)
+
+
+def _recording_markdown(m: RecordingMetrics, heading: str) -> str:
     out: list[str] = [f"# {heading}", ""]
 
     meta = [p for p in (m.recording_id, m.when, m.profile_id) if p]
@@ -632,9 +662,32 @@ def _aggregate_lines(agg: WindowAggregate) -> list[str]:
     ]
 
 
-def render_trend(report: TrendReport, *, title: str | None = None) -> str:
-    """The coaching summary, in the digest's markdown shape."""
+# How many conversations the per-conversation table and charts show: the most
+# recent ones. Past this a column chart stops being readable and a table stops
+# being skimmable; the aggregates above still count everything.
+PER_CONVERSATION_LIMIT = 12
+
+
+def render_trend(report: TrendReport, *, title: str | None = None,
+                 fmt: str = "markdown") -> str:
+    """
+    The coaching summary, in the digest's markdown shape.
+
+    HTML is rendered from the markdown -- so the two cannot say different
+    things -- with a chart layer over numbers the text already prints.
+    """
+    if fmt not in ("markdown", "html"):
+        raise InsightsError(f"unknown format '{fmt}'. Use markdown or html.")
     heading = title or f"Insights — last {report.days} days"
+    body = _trend_markdown(report, heading)
+    if fmt != "html":
+        return body
+    from .digest import to_html
+
+    return viz.inject(to_html(body, title=heading), trend_charts(report), after="</ul>")
+
+
+def _trend_markdown(report: TrendReport, heading: str) -> str:
     out: list[str] = [f"# {heading}", ""]
 
     if not report.recordings:
@@ -697,6 +750,26 @@ def render_trend(report: TrendReport, *, title: str | None = None) -> str:
             )
         out.append("")
 
+    recent = _recent(report)
+    if recent:
+        out += [
+            "## Per conversation", "",
+            "| When | Recording | Your share | Pace | Questions |",
+            "|---|---|---:|---:|---:|",
+        ]
+        for m in recent:
+            own = m.owner_metrics
+            out.append(
+                f"| {m.when or '-'} | {_cell(m.source_name)} "
+                + (f"| {_pct(own.share)} | {own.words_per_minute:.0f} wpm "
+                   f"| {_pct(own.question_rate)} |" if own else "| - | - | - |")
+            )
+        if len(report.recordings) > len(recent):
+            out.append("")
+            out.append(f"The {len(recent)} most recent of {len(report.recordings)}; "
+                       "the totals above count them all.")
+        out.append("")
+
     if report.excluded_personal:
         out += [
             f"{report.excluded_personal} personal recording(s) excluded, the same "
@@ -714,3 +787,99 @@ def render_trend(report: TrendReport, *, title: str | None = None) -> str:
 
     out += [_FOOTNOTE, ""]
     return "\n".join(out)
+
+
+def _recent(report: TrendReport) -> list[RecordingMetrics]:
+    """The most recent conversations, oldest first, for the table and charts."""
+    ordered = sorted(report.recordings, key=lambda m: (m.when, m.source_name))
+    return ordered[-PER_CONVERSATION_LIMIT:]
+
+
+def trend_charts(report: TrendReport) -> str:
+    """
+    The Insights chart block: you, conversation by conversation, and now
+    against the month before.
+
+    Every chart redraws numbers the page prints -- the per-conversation
+    table, the comparison table, the by-profile table. Your numbers wear one
+    color and everyone else's neutral gray, the same assignment in every
+    chart, so the legend holds exactly two keys. A conversation where your
+    voice was not identified is left out of the "you" charts rather than
+    drawn as zero; the table marks it with a dash.
+    """
+    if not report.recordings:
+        return ""
+    you, others = viz.slot(0), viz.NEUTRAL
+    recent = _recent(report)
+    mine = [(m, m.owner_metrics) for m in recent if m.owner_metrics]
+    parts: list[str] = []
+
+    if mine:
+        rows = [
+            (f"{m.when} · {m.source_name}",
+             [(o.share, you), (max(0.0, 1.0 - o.share), others)],
+             f"you {viz.fmt_share(o.share)}")
+            for m, o in mine
+        ]
+        title = "Bar chart. Your share of each conversation: " + "; ".join(
+            f"{label}, {printed}" for label, _, printed in rows
+        )
+        parts.append(viz.share_bars(rows, "Your share of each conversation", title))
+
+        ticks = viz.unique_ticks([m.when[5:10] for m, _ in mine])
+        pace = [[(o.words_per_minute, you)] for _, o in mine]
+        title = "Column chart. Your pace per conversation, words per minute: " + "; ".join(
+            f"{m.when}, {o.words_per_minute:.0f}" for m, o in mine
+        )
+        parts.append(viz.columns(pace, ticks, "Your pace, words per minute", title,
+                                 cap=lambda v: f"{v:.0f}", axis=lambda v: f"{v:.0f}",
+                                 show_zero=True))
+
+        questions = [[(o.question_rate * 100, you)] for _, o in mine]
+        title = "Column chart. Share of what you said that was a question: " + "; ".join(
+            f"{m.when}, {_pct(o.question_rate)}" for m, o in mine
+        )
+        parts.append(viz.columns(questions, ticks, "How much of what you said was a question",
+                                 title, cap=lambda v: f"{v:.0f}%", axis=lambda v: f"{v:.0f}%",
+                                 show_zero=True))
+    else:
+        parts.append(viz.quiet(
+            "Your share of each conversation",
+            f"Your voice ({report.owner_label or 'diarization.owner_label is unset'}) was not "
+            "identified in any conversation here, so there is nothing about you to chart. "
+            "Set diarization.owner_label to the name your transcripts use for you.",
+        ))
+
+    if report.deltas:
+        cur, pri = report.current, report.prior
+        whose = "You" if cur.focus == "owner" else "Everyone"
+        cls = you if cur.focus == "owner" else others
+        rows = [
+            (f"{whose}: talk share, last {DELTA_WINDOW_DAYS} days", cur.share,
+             viz.fmt_share(cur.share), cls),
+            (f"{whose}: talk share, the {DELTA_WINDOW_DAYS} before", pri.share,
+             viz.fmt_share(pri.share), cls),
+            (f"{whose}: question rate, last {DELTA_WINDOW_DAYS} days", cur.question_rate,
+             viz.fmt_share(cur.question_rate), cls),
+            (f"{whose}: question rate, the {DELTA_WINDOW_DAYS} before", pri.question_rate,
+             viz.fmt_share(pri.question_rate), cls),
+        ]
+        title = "Bar chart. This month against the month before: " + "; ".join(
+            f"{label}, {printed}" for label, _, printed, _ in rows
+        )
+        parts.append(viz.labelled_bars(rows, "This month against the month before", title))
+
+    if len(report.by_profile) > 1:
+        rows = [
+            (f"{pid}" + ("" if agg.focus == "owner" else " (everyone)"), agg.share,
+             f"{viz.fmt_share(agg.share)} · {agg.recordings} rec",
+             you if agg.focus == "owner" else others)
+            for pid, agg in report.by_profile.items()
+        ]
+        title = "Bar chart. Talk share by profile: " + "; ".join(
+            f"{label}, {printed}" for label, _, printed, _ in rows
+        )
+        parts.append(viz.labelled_bars(rows, "Your talk share, by profile", title))
+
+    keys = [("You", you), ("Everyone else", others)] if mine else None
+    return viz.block("In Charts", parts, keys)

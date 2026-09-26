@@ -660,7 +660,25 @@ def test_a_local_asr_that_is_installed_turns_that_line_green(app, monkeypatch):
     assert not item.ok and "needed for private recordings" in item.detail
 
 
+def _ffmpeg(monkeypatch, present: bool) -> None:
+    """
+    Decide ffmpeg's presence for a preflight test instead of inheriting it.
+
+    CI runs without ffmpeg on purpose; a dev box usually has it. A readiness
+    test that read the real machine passed on one and failed on the other --
+    which is how this suite sat red in CI while green on the box that wrote it.
+    """
+    from plaud_bridge.audio import AudioPreparer
+
+    def check_tools(self):
+        if not present:
+            raise RuntimeError("ffmpeg not found on PATH")
+
+    monkeypatch.setattr(AudioPreparer, "check_tools", check_tools)
+
+
 def test_a_groq_key_makes_the_cloud_brain_reachable_and_the_app_ready(app, monkeypatch):
+    _ffmpeg(monkeypatch, present=True)
     item = next(i for i in app.preflight(Brain.CLOUD) if i.name.startswith("analysis brain"))
     assert not item.ok and "Paste a Groq key" in item.detail
     assert app.is_ready(Brain.CLOUD) is False
@@ -672,6 +690,17 @@ def test_a_groq_key_makes_the_cloud_brain_reachable_and_the_app_ready(app, monke
     item = next(i for i in app.preflight(Brain.CLOUD) if i.name == "analysis brain (cloud)")
     assert item.ok and item.detail == "ready: groq"
     assert app.is_ready(Brain.CLOUD) is True
+
+
+def test_a_groq_key_alone_does_not_make_the_app_ready_without_ffmpeg(app, monkeypatch):
+    """The mirror case: a reachable brain cannot paper over a missing ffmpeg."""
+    _ffmpeg(monkeypatch, present=False)
+    app.set_groq_key("gsk_live")
+    brain = next(i for i in app.preflight(Brain.CLOUD) if i.name == "analysis brain (cloud)")
+    ffmpeg = next(i for i in app.preflight(Brain.CLOUD) if i.name == "ffmpeg")
+    assert brain.ok
+    assert not ffmpeg.ok and ffmpeg.fatal and "not found" in ffmpeg.detail
+    assert app.is_ready(Brain.CLOUD) is False
 
 
 # =========================================================================

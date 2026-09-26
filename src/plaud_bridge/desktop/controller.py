@@ -673,6 +673,48 @@ class AppController:
             db.close()
         return render_brief(brief, fmt="html")
 
+    # ---- the pages with charts ------------------------------------------
+    #
+    # Each renders the same page the CLI writes with --format html, so the app
+    # and the command line cannot show different numbers. They raise the
+    # engine's own error for the server to turn into a status code.
+
+    def insights_html(self, days: int = 90, include_personal: bool = False) -> str:
+        """The coaching page: talk share, pace, questions, with charts."""
+        from ..insights import render_trend, trend
+
+        cfg, db, archive, _vault = self._stores()
+        try:
+            report = trend(cfg, db, archive, days=days, include_personal=include_personal)
+        finally:
+            db.close()
+        return render_trend(report, fmt="html")
+
+    def people_html(self, include_personal: bool = False, name: str = "") -> str:
+        """The roster with its charts, or one person's page when `name` is given."""
+        from ..people import collect_people, person_detail, render_person, render_roster
+
+        cfg, db, archive, vault = self._stores()
+        try:
+            roster = collect_people(cfg, db, archive,
+                                    include_personal=include_personal, vault=vault)
+        finally:
+            db.close()
+        if name:
+            return render_person(person_detail(roster, name), fmt="html")
+        return render_roster(roster, fmt="html")
+
+    def followups_html(self, status: str | None = "open") -> str:
+        """The worklist with its aging charts."""
+        from ..followups import collect, render
+
+        cfg, db, archive, vault = self._stores()
+        try:
+            items = collect(cfg, db, archive, status=status, vault=vault)
+        finally:
+            db.close()
+        return render(items, fmt="html")
+
     def transcript(self, recording_id: str) -> dict:
         """The stored segments, shaped for the player's synced transcript."""
         from ..media import transcript_lines

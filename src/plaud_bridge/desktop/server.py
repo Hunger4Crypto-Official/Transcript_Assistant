@@ -368,6 +368,8 @@ class AppServer:
                     except Exception as exc:  # noqa: BLE001
                         self._send(500, f"could not build the brief: {exc}".encode(),
                                    "text/plain")
+                elif route in ("/api/insights/page", "/api/people/page", "/api/followups/page"):
+                    self._chart_page(route, parse_qs(urlparse(self.path).query))
                 elif route == "/api/transcript":
                     rid = parse_qs(urlparse(self.path).query).get("id", [""])[0]
                     result = app.controller.transcript(rid)
@@ -377,6 +379,38 @@ class AppServer:
                         parse_qs(urlparse(self.path).query).get("id", [""])[0])
                 else:
                     self._json(404, {"error": "no such route"})
+
+            def _chart_page(self, route: str, q: dict) -> None:
+                """
+                One of the self-contained pages with charts, the same page the
+                CLI writes with --format html. A person the roster has never
+                heard is a 404 (the engine's own refusal text), anything else
+                that fails is a 500 with the reason -- never a blank page.
+                """
+                from ..people import PeopleError
+
+                personal = q.get("personal", ["0"])[0] == "1"
+                try:
+                    if route == "/api/insights/page":
+                        try:
+                            days = max(1, min(int(q.get("days", ["90"])[0]), 3650))
+                        except ValueError:
+                            days = 90
+                        html = app.controller.insights_html(days=days, include_personal=personal)
+                    elif route == "/api/people/page":
+                        html = app.controller.people_html(
+                            include_personal=personal, name=q.get("name", [""])[0].strip())
+                    else:
+                        status = q.get("status", ["open"])[0]
+                        html = app.controller.followups_html(None if status == "all" else status)
+                except PeopleError as exc:
+                    self._send(404, str(exc).encode("utf-8"), "text/plain; charset=utf-8")
+                    return
+                except Exception as exc:  # noqa: BLE001
+                    self._send(500, f"could not build the page: {exc}".encode(),
+                               "text/plain; charset=utf-8")
+                    return
+                self._send(200, html.encode("utf-8"), "text/html; charset=utf-8")
 
             def _serve_media(self, recording_id: str) -> None:
                 """
@@ -760,6 +794,7 @@ _PAGE = r"""<!doctype html>
         <label style="margin:0">Everyone the archive has heard</label>
         <div class="row">
           <label style="margin:0; font-weight:400"><input type="checkbox" id="peoplepersonal" onchange="loadPeople()"> include personal</label>
+          <button class="small" onclick="openPage('people')">Open with charts</button>
           <button class="small" onclick="loadPeople()">Refresh</button>
         </div>
       </div>
@@ -784,6 +819,7 @@ _PAGE = r"""<!doctype html>
             <option value="3650">Everything</option>
           </select>
           <label style="margin:0; font-weight:400"><input type="checkbox" id="insightspersonal" onchange="loadInsights()"> include personal</label>
+          <button class="small primary" onclick="openPage('insights')">Open with charts</button>
           <button class="small" onclick="loadInsights()">Refresh</button>
         </div>
       </div>
@@ -834,6 +870,7 @@ _PAGE = r"""<!doctype html>
             <option value="open" selected>Open</option>
             <option value="all">All</option>
           </select>
+          <button class="small" onclick="openPage('followups')">Open with charts</button>
           <button class="small" onclick="loadFollowups()">Refresh</button>
         </div>
       </div>
@@ -1047,6 +1084,16 @@ function seekLine(k){
   try{audio.currentTime=l.start; audio.play();}catch(e){/* no audio: transcript-only */}}
 
 /* ---- brief ---- */
+/* The pages with charts: the same self-contained page the CLI writes with
+   --format html, opened in its own tab so it prints and saves cleanly. */
+function openPage(kind,name){
+  let q="?token="+TOKEN;
+  if(kind==="insights") q+="&days="+$("insightsdays").value+($("insightspersonal").checked?"&personal=1":"");
+  if(kind==="people") q+=($("peoplepersonal").checked?"&personal=1":"")+(name?"&name="+encodeURIComponent(name):"");
+  if(kind==="followups") q+="&status="+$("fustatus").value;
+  window.open("/api/"+kind+"/page"+q,"_blank");}
+function openPersonPage(i){
+  const p=(window._PEOPLE||[])[i]; if(p) openPage("people",p.label);}
 function openBrief(){
   const p=$("briefpersonal").checked?"1":"0";
   window.open("/api/brief?token="+TOKEN+"&days="+$("briefdays").value+
@@ -1076,6 +1123,7 @@ function showPerson(i){
   let html=`<div class="card"><h3 style="margin:.2rem 0">${esc(p.display_name)}</h3>
     <div class="detail">${esc(p.identity)} · ${esc(p.conversations)} conversation(s) ·
     ${esc(p.minutes_heard)} min heard · first ${esc(p.first_heard)} · last ${esc(p.last_heard)}</div>`;
+  if(!p.is_bucket) html+=`<div style="margin-top:8px"><button class="small" onclick="openPersonPage(${i})">Open their page with charts</button></div>`;
   if(p.topics&&p.topics.length)
     html+=`<div style="margin-top:8px"><b>Topics</b>: ${p.topics.map(esc).join(", ")}</div>`;
   if(p.things_they_said&&p.things_they_said.length){

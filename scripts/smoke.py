@@ -587,6 +587,9 @@ ROUTES: dict[str, list[Check]] = {
         c("insights", "--include-personal"),
         c("insights", "--recording", "{rec}", contains="Speaker"),
         c("insights", "--recording", "rec_does_not_exist", expect=(1,)),
+        c("insights", "--format", "html", "--out", "{out}/insights.html",
+          creates="{out}/insights.html"),
+        c("insights", "--recording", "{rec}", "--format", "html", contains="Who held the floor"),
     ],
     # The roster reads what the run already stored, so by this point Dana and
     # the owner are both in it. The unknown-name check matters as much as the

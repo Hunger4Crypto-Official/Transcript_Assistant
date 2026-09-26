@@ -17,6 +17,7 @@ from plaud_bridge.db import Database
 from plaud_bridge.digest import DigestBuilder, DigestOptions
 from plaud_bridge.digest.charts import charts_html, inject_charts
 from plaud_bridge.pipeline import Pipeline
+from plaud_bridge.viz import fmt_minutes
 
 
 def _processed(tmp_path, monkeypatch, cost=0.0, family=False):
@@ -76,7 +77,9 @@ def test_the_profile_bar_prints_the_minutes_and_count_the_index_holds(tmp_path, 
         assert minutes > 0, "a text transcript should synthesise a nonzero timeline"
 
         page = DigestBuilder(cfg, pipe.db).render_html(DigestOptions(days=30))
-        assert f"{minutes:.0f} min · 1 rec" in page
+        # The label comes from the shared formatter, so a short recording
+        # reads "1.2 min", never a rounded-down "1 min" or a bar labelled "0".
+        assert f"{fmt_minutes(minutes)} min · 1 rec" in page
         # The bar's identity is text, not hue alone: the section heading is in
         # the SVG's own labels and in its accessible title.
         assert "Bar chart. Minutes per section: Production" in page

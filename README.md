@@ -115,6 +115,7 @@ Other commands:
 | `run.py people --name "Marcus"` | One person's whole dossier |
 | `run.py insights` | **How you talk: share, pace, questions, monologues** |
 | `run.py insights --recording <id>` | One recording's per-speaker breakdown |
+| `run.py insights --format html --out i.html` | **The same, as a page with charts** |
 | `run.py memory --brief` | The briefing injected into the next analysis |
 | `run.py memory --rebuild` | Rebuild the ledgers from the archive |
 | `run.py open <id>` | Decrypt and print a transcript |

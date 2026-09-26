@@ -1,6 +1,93 @@
 # Changelog
 
-## Unreleased — a furnished first five minutes, and proofs instead of examples
+## Unreleased — charts on every page, and two bugs found by looking
+
+The digest had the only charts in the product. Now every page that summarises
+draws, from one shared module (`viz.py`) with one set of rules:
+
+- **Insights** (new `--format html`, and "Open with charts" in the app) — your
+  share of each conversation, your pace and question rate conversation by
+  conversation, this month against the month before, and your share by
+  profile. One conversation (`--recording`) shows who held the floor.
+- **People** — minutes heard per person, and how long since you last heard
+  each one, longest silence first. Each person's page charts every
+  conversation they were in.
+- **Brief** — where the week's minutes went, and how old the open promises
+  are, stacked by profile.
+- **Follow-ups** — open items by age (0–2, 3–7, 8–14, 15–30, 31+ days) and by
+  profile.
+
+The rules every chart keeps, pinned in `tests/test_visuals.py`: a chart
+redraws numbers its page already prints — Insights gained a per-conversation
+table so its charts have one — as inert SVG with no script and nothing
+fetched, a `<title>` on every chart for screen readers, and hue never the only
+signal: one color per role or profile, held across every chart on a page, and
+named once in a legend.
+
+**Found by rendering every page and looking at it:**
+
+- **Bars labelled "0" that visibly stood tall.** Any day, person, or profile
+  under a minute rounded down to zero — the digest's per-day chart, the People
+  table (two conversations, "0 minutes"), the brief's numbers. One formatter
+  now labels everything: a decimal under ten minutes, `<0.1` for a sliver,
+  and `0` only for a true zero. Where every column is a real observation (a
+  conversation with no questions), a measured zero is printed rather than
+  left blank; two conversations on one day read `09-23` and `09-23 (2)`.
+- **The brief's "People waiting on you" ran backwards.** It listed whoever
+  *said* each promise: your own promise to a client showed *you* waiting on
+  yourself, and the client's promise to you showed *them* waiting on you. The
+  brief now asks the People engine, which already files direction correctly,
+  and prints both halves — "Waiting on you" and "You are waiting on" — under
+  the heading "Who is waiting on whom". The material a model narrates from
+  states each promise's direction instead of the ambiguous "said by".
+
+## Earlier unreleased — tested to 99%, measured rather than claimed
+
+The suite went from "all tests pass" to a measured number, and then the
+number went up. Coverage is line **and** branch, enforced in CI by a floor
+that only ever rises (`make coverage`, `COVERAGE_FLOOR` in the Makefile).
+
+- **Before:** 829 tests, 87% line, 85% line+branch — 1,240 statements never
+  executed, including fourteen in the consent gate.
+- **After:** 1,477 tests, **99.32% line+branch** — 11 statements and 73
+  partial branches remain, each named in CLAUDE.md with the reason. The
+  consent gate is at 100% line and branch, mutation-verified.
+
+"Needs network" turned out to be an excuse, not a fact. `http_util`, both ASR
+providers, both LLM providers, and the diarization engine — the pile that had
+been written off as untestable in a sandbox — are driven by loopback stub
+servers scripted per test (503 twice then 200; a hang-up mid-reply; a stall
+past the timeout) and by fake `faster_whisper` / `pyannote.audio` modules
+injected into `sys.modules`. Nothing in the suite reaches a real network.
+
+**Writing the tests found three real bugs.** Each is fixed and pinned:
+
+- `review` read keyword suggestions for unfiled recordings straight off the
+  index row. The fallback profile encrypts at rest, so the index withholds
+  those fields — every encrypted unfiled recording answered "no keyword
+  suggestions", a false statement about the one thing that section exists to
+  report. It now opens the record through the archive and counts what would
+  not open rather than reading locked as empty.
+- A failure while *reading* an HTTP reply — a server that accepted the upload
+  and hung up, a reset mid-response — escaped `http_util` as a raw
+  `RemoteDisconnected`, skipping the retry loop, the provider's own error
+  handling, and the registry's failover to the next provider. The recording
+  crashed instead of falling back to local. Those are now retryable
+  `HttpError`s, pinned by a test whose server really hangs up.
+- A transcript line carrying only a speaker label (`Marcus:` with nothing
+  after it, which exporters emit on a speaker change) did not match the
+  speaker regex, so it fell through as literal text credited to `SPEAKER`:
+  the archive held an utterance whose words were somebody's name, bound for
+  search, the insights bucket, and the player. The guard written for exactly
+  that case could never fire. The regex now admits a bare label, narrowly.
+
+Every new test is named as a sentence for the behavior it pins, asserts
+outcomes rather than touching lines (assertion density across the 25 new files
+runs 1.8–5.5 per test), and the important ones were mutation-verified: the fix
+was broken deliberately, the test was confirmed to fail, and the fix was
+restored.
+
+## Earlier unreleased — a furnished first five minutes, and proofs instead of examples
 
 - **`demo`** — a fresh install no longer opens onto seven empty tabs. The
   command writes fictional sample recordings into the inbox and (with
