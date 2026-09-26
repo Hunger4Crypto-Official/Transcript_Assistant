@@ -58,6 +58,24 @@ nothing.
 Piping pytest through `tail` reports the pipe's exit code, not pytest's. Always
 echo `$?` from the unpiped command.
 
+**Local green is not CI green.** CI runs with no ffmpeg and blank API keys; this
+container usually has ffmpeg. A test that reads the real machine passes here and
+fails there -- CI sat red for weeks (Sept 7-26) on exactly that while every local
+gate passed. Two habits close it:
+
+1. Reproduce CI before trusting a coverage number or a readiness test:
+   ```bash
+   mv /usr/bin/ffmpeg{,.hidden} && mv /usr/bin/ffprobe{,.hidden}
+   GROQ_API_KEY= ANTHROPIC_API_KEY= HUGGINGFACE_TOKEN= make coverage PYTHON=.venv/bin/python
+   mv /usr/bin/ffmpeg{.hidden,} && mv /usr/bin/ffprobe{.hidden,}
+   ```
+2. After every push, read the actual GitHub Actions run for the branch (GitHub
+   MCP: `actions_list` → `list_workflow_runs`, then `get_job_logs` on a
+   failure). A push is not done until that run is green.
+
+Any test touching preflight/readiness must decide ffmpeg's presence itself
+(see `_ffmpeg` in `tests/test_desktop_edges.py`), never inherit it.
+
 Adding a CLI route means updating four places or the parity tests fail, by
 design: `cli.py`'s parser + docstring, `run.py`'s docstring, `scripts/smoke.py`
 (ROUTES + ROUTE_ORDER), and `tests/test_cli_routes.py` (COVERED + READ_ONLY).
@@ -72,13 +90,15 @@ deliberately, confirm the test fails, restore. Restore with a `cp` backup —
 
 - **Ruff clean. Every smoke route passes.** Test count and coverage move; the
   numbers below are the last measurement, and `make coverage` re-measures.
-- **Coverage is 99.34% line+branch** — measured 2026-09-25 over 1,522 tests
-  with the exact CI command: 11 of 9,680 statements and 74 of 3,164 branches
-  never run. CI enforces a floor of 99 (`COVERAGE_FLOOR` in the Makefile)
+- **Coverage is 99.17% line+branch under CI's conditions** (no ffmpeg, blank
+  keys) — measured 2026-09-26 over 1,523 tests: 24 of 9,680 statements and 83
+  of 3,164 branches never run. With ffmpeg present it reads 99.34% (11
+  statements), because ~16 real-audio tests skip without it. The CI floor
+  applies to the lower number. CI enforces a floor of 99 (`COVERAGE_FLOOR` in the Makefile)
   that only moves up. Raise it when the measurement rises; never lower it.
   - **`compliance/gate.py` is at 100% line and branch**, mutation-verified
     (`tests/test_compliance_gate_edges.py`).
-  - The 11 remaining statements, so nobody re-derives them: `archive.py`
+  - The 11 statements missed even with ffmpeg, so nobody re-derives them: `archive.py`
     360-368 (OSError branches inside `verify` — a file that vanishes or
     becomes unreadable mid-check; root cannot be denied a read, so they need
     a monkeypatched `read_bytes`); `ask.py` 440 (a defensive `continue` no
